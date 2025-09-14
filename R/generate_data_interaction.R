@@ -83,7 +83,7 @@ generate_data_interaction <- function(n_cells = 3000,
                                       interaction_feature_1 = c("sex","age","disease","bmi"),
                                       interaction_feature_2 = c("sex","age","disease","bmi"),
                                       fc_interact = 0.1, 
-                                      interaction_type = c("specific","differential","opposite"),
+                                      interaction_type = NULL,
                                       # Number of latent features
                                       n_features = 20,
                                       # Features associated with each attribute, ordered by variance explained

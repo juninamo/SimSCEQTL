@@ -128,7 +128,7 @@ generate_dummy_data_interaction <- function(n_cells = 3000,
   
   interact_clusters = c(1:n_major_interact_celltypes, (n_cell_types-n_minor_interact_celltypes+1):n_cell_types)
   interact_cell_types = LETTERS[interact_clusters]
-  
+  message(paste0("interaction_type; ", interaction_type))
   for (i in 1:n_cell_types) {
     if (is.factor(dummy_data[,interaction_feature_1]) && is.factor(dummy_data[,interaction_feature_2])){
       if(i %in% interact_clusters[seq(2,length(interact_clusters),2)]){

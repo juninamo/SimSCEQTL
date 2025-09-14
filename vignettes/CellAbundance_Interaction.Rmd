@@ -60,7 +60,7 @@ suppressWarnings({
 ```
 
 
-# Simulation of 
+Simulation of interaction effect on cell type abundance
 
 
 # Set parameters

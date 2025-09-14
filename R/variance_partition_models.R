@@ -10,12 +10,12 @@
 #' @importFrom lme4 lmer lmerControl
 #' @importFrom variancePartition calcVarPart
 #' @export
-apply_model_to_column <- function(column_data) {
-  # This function has a dependency on a global variable 'dummy_data'
+apply_model_to_column <- function(column_data, meta_data) {
+  # This function has a dependency on a global variable 'meta_data'
   # which is not best practice. It should be passed as an argument.
   # For now, assuming it exists in the environment where this is called.
   form_test <- as.formula(paste0("column_data ~ (1|cell_type) + (1|sex) + (1|disease) + (1|batch) + (1|subject_id) + age + bmi"))
-  fit <- lme4::lmer(form_test, data = dummy_data, REML = FALSE, control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+  fit <- lme4::lmer(form_test, data = meta_data, REML = FALSE, control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
   var_stats <- variancePartition::calcVarPart(fit)
   return(var_stats)
 }

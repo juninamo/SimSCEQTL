@@ -1,0 +1,1555 @@
+---
+title: "Code for simulateing single-cell eQTL by count data"
+author: 
+  name: Jun Inamo
+  email: juninamo@keio.jp
+  affiliation: Department of Microbiology and Immunology, Keio University School of Medicine, Tokyo, Japan
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  BiocStyle::html_document:
+    toc_float: true
+params:
+  n_thread: 14 
+  n_cells: 100
+  n_individuals: 200 
+  cluster_ratio: 0.65
+  batch_ratio: 0
+---
+
+```{r, echo=FALSE, results="hide", message=FALSE}
+knitr::opts_chunk$set(error=FALSE, message=FALSE, warning=FALSE)
+# BiocManager::install("BiocStyle")
+library(BiocStyle)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+library(SimSCEQTL)
+
+suppressWarnings({
+  library(dplyr)
+  library(tidyr)
+  library(tidyverse)
+
+  library(MASS)
+  library(caret)
+  
+  library(Seurat)
+  library(presto)
+  library(ggplot2)
+  library(ggrepel)
+  library(glue)
+  
+  library(stevemisc)
+  library(stevedata)
+  library(lme4)
+  library(broom.mixed)
+
+  library(doParallel)
+  library(pbapply)
+  library(variancePartition)
+  library(data.table)
+  library(MatrixEQTL)
+  library(harmony)
+  library(foreach)
+  library(parallel)
+
+})
+
+```
+
+
+
+# Simulation of single-cell eQTL
+
+---
+## Objective
+
+To evaluate the statistical power of detecting an eQTL relationship between the normalized expression of **Gene1** and **pseudobulk cell cluster A**. The evaluation will be performed across various combinations of **sample sizes**, **effect sizes** (correlation coefficients), and **minor allele frequencies (MAFs)**.
+
+---
+## Simulation Workflow
+
+1.  **Generate Dummy Data:** Generate dummy features and metadata for a specified number of samples.
+    * The dummy features are assumed to be influenced by confounding factors, including **cell type**, **batch** (as a random effect), and **age** (as a fixed effect).
+
+2.  **Simulate scRNA-seq Counts:** To mimic single-cell RNA sequencing data, generate a sparse count matrix from the dummy features, with counts following a Poisson or Negative Binomial distribution.
+
+3.  **Normalize Counts:** Normalize the generated count data.
+
+4.  **Generate Pseudobulk Profiles:** Aggregate the normalized single-cell counts to create pseudobulk expression profiles for each cell type and sample.
+
+5.  **Generate Ground Truth Genotypes:** As the ground truth, simulate genotype dosages at specified MAFs. These genotypes are generated under the assumption that the dosage is correlated with the normalized expression of **Gene1** specifically within **pseudobulk cell cluster A** at a predefined correlation coefficient.
+    * *Note: Genomic structures such as Linkage Disequilibrium (LD) are not considered. Therefore, the genotypes generated in each scenario are homogeneous, meaning each simulated SNP independently possesses the intended correlation with expression.*
+
+6.  **Perform Pseudobulk eQTL Analysis:** Using the expression of cell cluster A and the simulated genotypes, perform a standard pseudobulk eQTL analysis.
+    * **Negative Control:** When the target correlation coefficient is set to 0, the statistical power should be close to the Type I error rate (e.g., 5%).
+    * **Positive Control:** When the target correlation coefficient is greater than 0 for the relationship between Gene1 and cell cluster A.
+
+7.  **Perform Single-Cell eQTL Analysis:** Using the full simulated single-cell dataset, perform a cell-level eQTL analysis.
+    * **Negative Control:** When the target correlation coefficient is set to 0.
+    * **Positive Control:** When the target correlation coefficient is greater than 0 for Gene1 across all relevant cells.
+---
+
+# Set parameters
+
+```{r, eval=FALSE}
+params <- list(
+  n_thread = 14,
+  n_cells = 100,
+  n_individuals = 200,
+  cluster_ratio = 0.65,
+  batch_ratio = 0
+)
+```
+
+```{r}
+n_thread=params$n_thread
+registerDoParallel(cores = n_thread)  # use forking with X cores
+
+# parameters for generating dummy dataset
+n_cells=params$n_cells # cells per major cell type
+sd_celltypes=0.1  # standard deviation of number of cells 
+n_major_cell_types=3 # number of major cell types
+n_minor_cell_types=1 # number of minor cell types
+relative_abundance=0.4 # ratio between major and rare
+n_individuals=params$n_individuals # total individuals
+n_batchs=4 # total batches
+prop_sex=0.5 # proportion of female
+prop_disease=0.5  # proportion of case
+fc_increase=0 # additional FC of specified cell types which are from people with case groups compared to control groups (e.g., if you specify 0.5, FC comparing increased cell type between case and control groups will be 1.5 in total)
+n_major_diff_celltypes=1 # number of major cell types which are differentially abundant between two groups. This parameter is effective only when fc_increase > 0
+n_minor_diff_celltypes=1 # number of minor cell types which are differentially abundant between two groups. This parameter is effective only when fc_increase > 0
+
+print(paste0("n_thread: ", n_thread))
+print(paste0("n_cells: ", n_cells))
+print(paste0("sd_celltypes: ", sd_celltypes))
+print(paste0("n_major_cell_types: ", n_major_cell_types))
+print(paste0("n_minor_cell_types: ", n_minor_cell_types))
+print(paste0("relative_abundance: ", relative_abundance))
+print(paste0("n_major_diff_celltypes: ", n_major_diff_celltypes))
+print(paste0("n_minor_diff_celltypes: ", n_minor_diff_celltypes))
+print(paste0("n_individuals: ", n_individuals))
+print(paste0("n_batchs: ", n_batchs))
+print(paste0("prop_sex: ", prop_sex))
+print(paste0("prop_disease: ", prop_disease))
+print(paste0("fc_increase: ", fc_increase))
+
+n_features = 200
+cluster_features = 1:50
+disease_features = 1:50
+sex_features = 1:50 # seq(2, 20, by = 2)
+age_features = 1:50 # seq(2, 10, by = 2)
+bmi_features = 1:50 # seq(11, 20, by = 2)
+batch_features = 1:100 # seq(1, 20,by = 2)
+individual_features = 1:100 # seq(1, 20,by = 2)
+
+# Define the maximum variance in features of each attribute
+cluster_ratio = params$cluster_ratio
+disease_ratio = 0.01
+sex_ratio = 0.01 # 0.05
+age_ratio = 0.01 # 0.05
+bmi_ratio = 0.01 # 0.05
+batch_ratio = params$batch_ratio # 0.1
+individual_ratio = 0.01 # 0.1
+
+n_pcs = 20
+
+ratio_variance = 0.1
+
+cluster_col = "cell_type"
+sex_col = "sex"
+age_col = "age"
+bmi_col = "bmi"
+batch_col = "batch"
+disease_col = "disease"
+individual_col = 'subject_id'
+
+# parameters for UMAP
+n_neighbors = 30
+metric = "cosine"
+min_dist = 0.01
+
+samplem_key = 'subject_id'
+
+# parameters for eQTL
+eqtl_celltype = "A" # major cell type
+eqtl_gene = "Gene1" # gene to be tested for eQTL
+cor_vals = c(0, 0.15, 0.3) # correlation coefficients to be tested between expression of eqtl_gene in eqtl_celltype and genotype (dosage)
+allele_freqs = c(0.05, 0.3) # allele frequencies to be tested
+n_snps = 100 # number of simulation SNPs
+dist_type = "nb" # c("nb","poisson") # distribution of simulated counts. nb= negative binomial, poisson= Poisson distribution
+seed = 1234
+
+```
+
+# Generating dummy metadata and feature matrix
+
+```{r, warning=FALSE}
+# Generate simulated data
+datasets = generate_data(n_cells = n_cells,
+                         sd_celltypes = sd_celltypes, 
+                         n_major_cell_types = n_major_cell_types,
+                         n_minor_cell_types = n_minor_cell_types,
+                         relative_abundance = relative_abundance, 
+                         n_major_diff_celltypes = n_major_diff_celltypes,
+                         n_minor_diff_celltypes = n_minor_diff_celltypes,
+                         
+                         n_individuals = n_individuals,
+                         n_batchs = n_batchs,
+                         prop_sex = prop_sex, 
+                         prop_disease = prop_disease, 
+                         fc_increase = fc_increase, 
+                         
+                         n_features = n_features, 
+                         cluster_features = cluster_features,
+                         disease_features = disease_features,
+                         sex_features = sex_features, 
+                         age_features = age_features,
+                         bmi_features = bmi_features,
+                         batch_features = batch_features,
+                         individual_features = individual_features,
+                         
+                         cluster_ratio = cluster_ratio,
+                         disease_ratio = disease_ratio,
+                         sex_ratio = sex_ratio,
+                         age_ratio = age_ratio,
+                         bmi_ratio = bmi_ratio,
+                         batch_ratio = batch_ratio,
+                         individual_ratio = individual_ratio,
+                         
+                         ratio_variance = ratio_variance,
+                         
+                         cluster_col = cluster_col,
+                         sex_col = sex_col,
+                         age_col = age_col,
+                         bmi_col = bmi_col,
+                         batch_col = batch_col,
+                         disease_col = disease_col,
+                         individual_col = individual_col,
+                         
+                         dist_type = dist_type,
+                         eqtl_celltype = eqtl_celltype, 
+                         eqtl_gene = eqtl_gene,
+                         cor_vals = cor_vals,
+                         allele_freqs = allele_freqs,
+                         n_snps = n_snps, 
+                         
+                         seed = seed,
+                         n_thread = n_thread,
+                         verbose = TRUE
+                         
+                         )
+
+
+```
+
+```{r}
+simulation_counts = datasets$simulation_counts
+head(simulation_counts)
+dim(simulation_counts)
+meta_data = datasets$dummy_data
+head(meta_data)
+dim(meta_data)
+bulk_df = datasets$bulk_df # normalized pseudobulk data
+head(bulk_df)
+genotype_df_list = datasets$genotype_df_list
+str(genotype_df_list)
+cor_summary_df_list = datasets$cor_summary_df_list
+cor_summary_df_list
+```
+
+
+## Inspect the generated count data
+
+
+```{r, fig.width=4, fig.height=4}
+head(simulation_counts)
+dim(simulation_counts)
+apply(simulation_counts, 2, summary)
+apply(simulation_counts, 2, quantile)
+
+for(i in 1:6){
+  hist(simulation_counts[,i], main = paste("Histogram of Column", i), xlab = "Counts", ylab = "Frequency", breaks = 100)
+}
+for(i in (ncol(simulation_counts)-5):ncol(simulation_counts)){
+  hist(simulation_counts[,i], main = paste("Histogram of Column", i), xlab = "Counts", ylab = "Frequency", breaks = 100)
+}
+
+
+```
+
+## Variance partitioning for simulated count data
+
+```{r, fig.height=45, fig.width=6, warning=FALSE, message=FALSE}
+
+cl <- makeCluster(n_thread)
+
+# Export the necessary objects and functions to the cluster
+clusterExport(cl, list("apply_countmodel_to_column", "meta_data", "simulation_counts"))
+
+# Load the necessary packages on each worker
+clusterEvalQ(cl, {
+  library(lme4)
+  library(variancePartition)
+})
+
+results <- parLapply(cl, 1:ncol(simulation_counts), function(col_index) {
+  column_data <- simulation_counts[, col_index]
+  tryCatch({
+    apply_countmodel_to_column(column_data, meta_data)
+  }, error = function(e) {
+    vars_na = rep(NA,8)
+    names(vars_na) = c('batch', 'cell_type', 'disease', 'sex', 'subject_id', 'age', 'bmi', 'Residuals')
+    return(vars_na)
+    # return(list(error = e$message))
+  })
+})
+stopCluster(cl)
+
+
+# Assuming 'results' is your list of variance partitions
+# Convert the list of results to a data frame
+results_df <- do.call(rbind, lapply(results, function(x) as.data.frame(t(x))))
+colnames(results_df) <- c('batch', 'cell_type', 'disease', 'sex', 'subject_id', 'age', 'bmi', 'Residuals')
+# results_df = na.omit(results_df)
+results_df$Gene <- paste0("Gene", 1:ncol(simulation_counts))
+
+results_long <- tidyr::gather(results_df, key = "variable", value = "variance", -Gene)
+
+# Compute the percentage of variance explained by each variable for each Gene
+results_long <- results_long %>%
+  dplyr::group_by(Gene) %>%
+  dplyr::mutate(percentage = (variance / sum(variance)) * 100) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(#Gene = factor(Gene, levels = paste0("Gene", c(1:10,(ncol(simulation_counts)-9):ncol(simulation_counts)))),
+    Gene = factor(Gene, levels = paste0("Gene", 1:ncol(simulation_counts))),
+    variable = factor(variable, levels = c('cell_type', 'batch', 'disease', 'sex', 'subject_id', 'age', 'bmi', 'Residuals')))
+
+# Create the stacked bar plot
+ggplot(na.omit(results_long), aes(x = Gene, y = percentage, fill = variable)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Genes", y = "Variance Explained (%)", title = "Variance Explained") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(strip.text.x=element_text(size=15, color="black", face="bold"),
+        strip.text.y=element_text(size=15, color="black", face="bold"),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 15),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 0.8, hjust = 0)
+  )
+
+```
+
+## Mean-variance relationship for simulated count data
+
+```{r, fig.height=5, fig.width=5, warning=FALSE, message=FALSE}
+vargenes_means_sds <- tibble(symbol = paste0("Gene",1:ncol(simulation_counts)), mean = Matrix::rowMeans(t(simulation_counts)))
+vargenes_means_sds$stddev = singlecellmethods::rowSDs(t(Matrix(as.matrix(simulation_counts), sparse = TRUE)), vargenes_means_sds$mean)
+vargenes_means_sds[1:4,]
+
+ggplot(vargenes_means_sds, aes(mean, stddev)) +
+  ggpointdensity::geom_pointdensity(size = 1) +
+  viridis::scale_color_viridis() +
+  geom_abline(intercept = 0, slope = 1, color = "red") +
+  xlim(0, max(vargenes_means_sds$mean)) +
+  ylim(0, max(vargenes_means_sds$stddev)) +
+  theme_bw(base_size = 20) +
+  theme(legend.position="none")
+
+```
+
+
+## check correlation across simulated genes
+
+```{r, fig.height=30, fig.width=30, warning=FALSE, message=FALSE}
+# cor(simulation_counts)
+calculate_cor_and_p <- function(df) {
+  n <- ncol(df)
+  cor_matrix <- matrix(nrow = n, ncol = n)
+  p_matrix <- matrix(nrow = n, ncol = n)
+  colnames(cor_matrix) <- colnames(df)
+  rownames(cor_matrix) <- colnames(df)
+  colnames(p_matrix) <- colnames(df)
+  rownames(p_matrix) <- colnames(df)
+  
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      test_result <- cor.test(df[,i], df[,j], method = "spearman")
+      cor_matrix[i,j] <- test_result$estimate
+      cor_matrix[j,i] <- test_result$estimate
+      p_matrix[i,j] <- test_result$p.value
+      p_matrix[j,i] <- test_result$p.value
+    }
+  }
+  
+  return(list(r = cor_matrix, P = p_matrix))
+}
+cor_res <- calculate_cor_and_p(simulation_counts)
+diag(cor_res$P) <- NA
+diag(cor_res$r) <- NA
+summary(as.vector(cor_res$r))
+summary(as.vector(cor_res$P))
+corrplot::corrplot(cor_res$r)
+
+```
+
+
+# Normalization and PCA for simulated count data
+
+```{r}
+
+exprs_norm <- as(Matrix(as.matrix(simulation_counts), sparse = TRUE), "dgCMatrix") %>% NormalizeDataSeurat()
+exprs_scaled <- t(scale(t(exprs_norm)))
+
+exprs_cosine <- exprs_scaled %>% cosine_normalize(2)
+
+# PCA for top 20 PCs
+set.seed(1234)
+pca_res <- irlba::prcomp_irlba(exprs_cosine, 20)
+umap_res_fromCount <- uwot::umap(pca_res$x, n_neighbors = n_neighbors, metric = "cosine", min_dist = min_dist)
+umap_res_fromCount = umap_res_fromCount %>% 
+  magrittr::set_colnames(c("UMAP1","UMAP2")) %>%
+  as.data.frame()
+
+cluster_center <- data.frame(meta_data, umap_res_fromCount) %>%
+  dplyr::group_by(cell_type) %>%
+  dplyr::summarise_at(vars(UMAP1, UMAP2), dplyr::funs(median(., na.rm=TRUE)))
+cluster_center <- as.data.frame(cluster_center)
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "cell_type"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  geom_label_repel(
+    data = cluster_center,
+    aes(x = UMAP1, y = UMAP2, label = cell_type, fill = cell_type),
+    color = "white",segment.color = "black",
+    size = 7,
+    min.segment.length = 0, seed = 42, box.padding = 0.8,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = ""
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "none",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "subject_id"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by subject_id"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "none",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "disease"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by disease"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "none",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "batch"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by batch"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "none",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "age"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by age"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "bmi"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by bmi"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+
+ggplot() +
+  geom_point(
+    data = data.frame(meta_data, umap_res_fromCount) %>% sample_n(nrow(.)),
+    mapping = aes_string(x = "UMAP1", y = "UMAP2", color = "sex"),
+    size = 1, stroke = 0, shape = 16,alpha = 0.3
+  ) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "color by sex"
+  ) +
+  coord_fixed(ratio = 1.2) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 10, hjust = 0))
+```
+
+bulk_df is pseudobulk normalized data
+
+```{r}
+
+for(i in 1:6){
+  hist(as.numeric(bulk_df[i,grep("^Gene",colnames(bulk_df),value=TRUE)]), main = paste("Histogram of Column", i), xlab = "Counts", ylab = "Frequency", breaks = 10)
+}
+  
+```
+
+
+
+# Pseudobulk eQTL analysis
+
+```{r, message=FALSE, warning=FALSE}
+
+cl <- makeCluster(n_thread)
+registerDoParallel(cl)
+
+output_all_pbeqtl = data.frame()
+
+for(clu in unique(bulk_df$cell_type)){
+  message(clu)
+  output_all_pbeqtl_tmp <- foreach(task = names(genotype_df_list), .combine = rbind, .packages = c("dplyr", "magrittr", "tibble", "MatrixEQTL")) %dopar% {
+    
+    bulk_df_tmp = genotype_df_list[[task]] %>%
+      magrittr::set_colnames(bulk_df[bulk_df$cell_type == eqtl_celltype, "subject_id"]) %>%
+      magrittr::set_rownames(paste0("dosage",1:n_snps)) %>%
+      t() %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column(var = "subject_id") %>%
+      dplyr::left_join(bulk_df, ., by = "subject_id")
+    
+    E = bulk_df_tmp[bulk_df_tmp$cell_type == clu, ] %>%
+      dplyr::select(starts_with("subject_id") | starts_with("Gene")) 
+    rownames(E) = E$subject_id
+    E = E %>%
+      dplyr::select(-subject_id) %>%
+      dplyr::mutate(across(everything(), as.numeric)) %>%
+      t() %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("geneid")
+    
+    covs = bulk_df_tmp[bulk_df_tmp$cell_type == clu, c(samplem_key, sex_col,age_col,bmi_col)] 
+    rownames(covs) = covs[,samplem_key]
+    covs = covs %>%
+      dplyr::select(-subject_id) %>%
+      dplyr::mutate(across(everything(), as.numeric)) %>%
+      t() %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("id")
+    covs = covs[,c("id",colnames(E)[-1])]
+    
+    G = bulk_df_tmp[bulk_df$cell_type == clu, ] %>%
+      dplyr::select(starts_with("subject_id") | starts_with("dosage")) 
+    rownames(G) = G$subject_id
+    G = G %>%
+      dplyr::select(-subject_id) %>%
+      dplyr::mutate(across(everything(), as.numeric)) %>%
+      t() %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("snpid")
+    
+    all(colnames(covs)[-1] == colnames(E)[-1])
+    all(colnames(covs)[-1] == colnames(G)[-1])
+    if(stringr::str_split(getwd(), pattern="/", simplify=TRUE)[,2]=="Users"){
+      path_geno = paste0("~/snps_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+      path_exp = paste0("~/exp_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+      path_cov = paste0("~/cov_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+    } else {
+      path_geno = paste0(tempdir(), "/snps_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+      path_exp = paste0(tempdir(), "/exp_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+      path_cov = paste0(tempdir(), "/cov_",task,"_Ncell", n_cells, "_Nind", n_individuals, "_VarCluster", cluster_ratio, "_VarBatch", batch_ratio, ".txt")
+    }
+    
+    write.table(G, path_geno, sep = "\t",quote=FALSE, row.names = FALSE)
+    write.table(E, path_exp, sep = "\t",quote=FALSE, row.names = FALSE)
+    write.table(covs, path_cov, sep = "\t",quote=FALSE, row.names = FALSE)
+    
+    # Linear model to use, modelANOVA, modelLINEAR, or modelLINEAR_CROSS
+    useModel = modelLINEAR; # modelANOVA, modelLINEAR, or modelLINEAR_CROSS
+    
+    # Genotype file name
+    SNP_file_name = path_geno
+    
+    # Gene expression file name
+    expression_file_name = path_exp
+    
+    # Covariates file name
+    # Set to character() for no covariates
+    covariates_file_name = path_cov
+    
+    # Error covariance matrix
+    # Set to numeric() for identity.
+    errorCovariance = numeric();
+    
+    pvOutputThreshold = 1;
+    
+    # Output file name
+    output_file_name = tempfile();
+    
+    ## Load genotype data
+    SNPs = SlicedData$new();
+    SNPs$fileDelimiter = "\t";      # the TAB character
+    SNPs$fileOmitCharacters = "NA"; # denote missing values;
+    SNPs$fileSkipRows = 1;          # one row of column labels
+    SNPs$fileSkipColumns = 1;       # one column of row labels
+    SNPs$fileSliceSize = 2000;      # read file in slices of 2,000 rows
+    SNPs$LoadFile(SNP_file_name);
+    
+    ## Load gene expression data
+    Genes = SlicedData$new();
+    Genes$fileDelimiter = "\t";      # the TAB character
+    Genes$fileOmitCharacters = "NA"; # denote missing values;
+    Genes$fileSkipRows = 1;          # one row of column labels
+    Genes$fileSkipColumns = 1;       # one column of row labels
+    Genes$fileSliceSize = 2000;      # read file in slices of 2,000 rows
+    Genes$LoadFile(expression_file_name);
+    
+    ## Load covariates
+    cvrt = SlicedData$new();
+    cvrt$fileDelimiter = "\t";      # the TAB character
+    cvrt$fileOmitCharacters = "NA"; # denote missing values;
+    cvrt$fileSkipRows = 1;          # one row of column labels
+    cvrt$fileSkipColumns = 1;       # one column of row labels
+    if(length(covariates_file_name)>0) {
+      cvrt$LoadFile(covariates_file_name);
+    }
+    
+    
+    ## Run the analysis
+    
+    me = Matrix_eQTL_engine(
+      snps = SNPs,
+      gene = Genes,
+      cvrt = cvrt,
+      output_file_name = output_file_name,
+      pvOutputThreshold = pvOutputThreshold,
+      useModel = useModel,
+      errorCovariance = errorCovariance,
+      verbose = FALSE,
+      pvalue.hist = TRUE,
+      min.pv.by.genesnp = FALSE,
+      noFDRsaveMemory = FALSE);
+    
+    unlink(output_file_name);
+    
+    file.remove(path_geno)
+    file.remove(path_exp)
+    file.remove(path_cov)
+    
+    me$all$eqtls %>%
+      dplyr::mutate(effect_truth = as.numeric(stringr::str_split(task,pattern="_",simplify = TRUE)[,1]),
+                    allele_freq = as.numeric(stringr::str_split(task,"_",simplify = TRUE)[,2]),
+                    Nind = n_individuals,
+                    Ncell = n_cells,
+                    VarCluster = cluster_ratio,
+                    VarBatch = batch_ratio,
+                    Nsnps = n_snps,
+                    z = qnorm(pvalue/2, lower.tail = F)*sign(beta), 
+                    se = beta/z,
+                    cluster = clu
+      )
+    
+  }
+  output_all_pbeqtl = rbind(output_all_pbeqtl,output_all_pbeqtl_tmp)
+}  
+
+stopCluster(cl)
+
+
+```
+
+## How to calculate confidence intervals
+
+
+### ## Calculating Confidence Intervals for `beta` and `power`
+
+There are several methods for calculating confidence intervals for a **proportion**, such as methods based on the binomial distribution or the normal approximation. Here, we will use the **Wilson score interval**, which is a relatively simple and widely used method based on the normal approximation. The Wilson score interval is particularly useful for small sample sizes or when the observed proportion is close to 0 or 1.
+
+The Wilson score interval is calculated using the following formula:
+
+$$
+CI = \hat{p} \pm z \sqrt{\frac{\hat{p}(1 - \hat{p})}{n} + \frac{z^2}{4n^2}} \Big/ \left(1 + \frac{z^2}{n}\right)
+$$
+
+Where:
+-   $\hat{p}$ is the observed **proportion** in the sample (in this case, `power`).
+-   $z$ is the z-score corresponding to the desired **confidence level** (e.g., 1.96 for a 95% confidence interval).
+-   $n$ is the total number of **trials**.
+
+*Note: This calculation assumes that the number of trials is equal for each group being compared.*
+
+## Check powers of pseudobulk eQTL analysis
+
+```{r, fig.width=8, fig.height=5}
+output_all_pbeqtl_summary <- output_all_pbeqtl %>%
+  dplyr::group_by(gene, cluster, effect_truth, allele_freq,  Nind, Ncell, VarCluster, VarBatch) %>%
+  dplyr::summarize(median_beta = median(beta),
+                   lower_ci_beta = quantile(beta,0.025),
+                   upper_ci_beta = quantile(beta,0.975),
+                   median_pvalue = median(pvalue),
+                   se_median = median(se, na.rm=TRUE),  
+                   power = mean(pvalue < 0.05)) %>%
+  as.data.frame()
+
+# Gene1 is positive control
+for(Gene in paste0("Gene1")){
+  plot(
+    ggplot(output_all_pbeqtl_summary %>%
+             dplyr::mutate(
+               n = n_snps,  
+               z = qnorm(0.975),  
+               power_ci_lower = (power + z^2/(2*n) - z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+               power_ci_upper = (power + z^2/(2*n) + z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+               beta_ci_lower = median_beta - z * se_median,
+               beta_ci_upper = median_beta + z * se_median
+             ) %>%
+             dplyr::select(-n, -z, -se_median) %>%
+             dplyr::filter((gene == Gene)) %>%
+             dplyr::mutate(group = paste0("Eff=",effect_truth, "; MAF=",allele_freq, "; Ncell=",Ncell, "; Nind=",Nind, "; VarCluster=",VarCluster, "; VarBatch=",VarBatch)) %>%
+             dplyr::ungroup(), 
+           aes(x=group, y=power)) +
+      geom_bar(stat="identity", position=position_dodge(), fill="skyblue") +
+      geom_errorbar(aes(ymin=power_ci_lower, ymax=power_ci_upper), width=.2, position=position_dodge(.9)) +
+      coord_flip() +
+      facet_grid(. ~ cluster, scales="free") +
+      theme_minimal() +
+      geom_hline(yintercept = c(0.8), linetype="dashed", color="red") +
+      theme() +
+      # labs(x="Setting", y="Power", title="Power by Setting",
+      #      subtitle = paste0(Gene,"\ncoef-cor with Gene1 = ", round(cor_res$r["Gene1",Gene], digit=3),"\np-cor with Gene1 = ", round(cor_res$P["Gene1",Gene], digit=3)))
+      labs(x="Setting", y="Power", title="Power by Setting",
+           subtitle = paste0(Gene))
+  )
+}
+
+```
+
+
+```{r, fig.width=8, fig.height=5}
+# Gene2 is negative control, not correlated with snps
+for(Gene in paste0("Gene2")){
+  plot(
+    ggplot(output_all_pbeqtl_summary %>%
+             dplyr::mutate(
+               n = n_snps,  # 各グループの観測数
+               z = qnorm(0.975),  # 95% CIのz値
+               power_ci_lower = (power + z^2/(2*n) - z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+               power_ci_upper = (power + z^2/(2*n) + z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+               beta_ci_lower = median_beta - z * se_median,
+               beta_ci_upper = median_beta + z * se_median
+             ) %>%
+             dplyr::select(-n, -z, -se_median) %>%
+             dplyr::filter((gene == Gene)) %>%
+             dplyr::mutate(group = paste0("Eff=",effect_truth, "; MAF=",allele_freq, "; Ncell=",Ncell, "; Nind=",Nind, "; VarCluster=",VarCluster, "; VarBatch=",VarBatch)) %>%
+             dplyr::ungroup(), 
+           aes(x=group, y=power)) +
+      geom_bar(stat="identity", position=position_dodge(), fill="skyblue") +
+      geom_errorbar(aes(ymin=power_ci_lower, ymax=power_ci_upper), width=.2, position=position_dodge(.9)) +
+      coord_flip() +
+      facet_grid(. ~ cluster, scales="free") +
+      theme_minimal() +
+      geom_hline(yintercept = c(0.8), linetype="dashed", color="red") +
+      theme() +
+      # labs(x="Setting", y="Power", title="Power by Setting",
+      #      subtitle = paste0(Gene,"\ncoef-cor with Gene1 = ", round(cor_res$r["Gene1",Gene], digit=3),"\np-cor with Gene1 = ", round(cor_res$P["Gene1",Gene], digit=3)))
+      labs(x="Setting", y="Power", title="Power by Setting",
+           subtitle = paste0(Gene))
+  )
+}
+```
+
+## check eQTL results by plot
+
+```{r, message=FALSE, warning=FALSE, fig.width=6, fig.height=3}
+
+
+snp = "dosage2" # you can specify any snp because the effect size is the same for all snps
+
+# for(Gene in paste0("Gene",1:ncol(simulation_counts))){
+for(Gene in paste0("Gene1")){
+  for(effect_truth_ in cor_vals){
+    for(allele_freq_ in allele_freqs){
+      data = genotype_df_list[[paste0(effect_truth_,"_",allele_freq_)]] %>%
+        magrittr::set_colnames(bulk_df[bulk_df$cell_type == eqtl_celltype, "subject_id"]) %>%
+        magrittr::set_rownames(paste0("dosage",1:n_snps)) %>%
+        t() %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "subject_id") %>%
+        dplyr::left_join(bulk_df, ., by = "subject_id") %>%
+        dplyr::distinct(subject_id, cell_type, sex, age, bmi, batch, disease, eval(parse(text=(Gene))), eval(parse(text=(snp)))) %>%
+        magrittr::set_colnames(c("subject_id", "cell_type", "sex", "age", "bmi", "batch", "disease", "Gene", "dosage"))
+      
+      regression_results <- output_all_pbeqtl_summary %>%
+        as.data.frame() %>%
+        dplyr::filter(effect_truth == effect_truth_, allele_freq == allele_freq_, gene == Gene) %>%
+        dplyr::distinct(cluster, median_beta, median_pvalue) %>%
+        dplyr::mutate(x=2,y=Inf,
+                      lab = paste0("β = ", round(median_beta, 3), "\np = ", format.pval(median_pvalue, digits = 3)),
+                      cell_type = factor(cluster))
+      plot(
+        ggplot(data, 
+               aes(x = as.factor(dosage), y = Gene, color = cell_type)) +
+          geom_boxplot(outlier.shape = NA) +
+          geom_jitter(alpha = 0.5, size = 0.5, aes(fill = cell_type)) +
+          geom_smooth(method = "lm", aes(group = cell_type), se = FALSE, color = "black") +
+          theme_minimal() +
+          theme(legend.position = "none") +
+          labs(title = paste0("eQTL Boxplot for cell clusters for ", Gene),
+               #subtitle = paste0("effect size (Gene1)=",effect_truth_,";\nallele frequency=",allele_freq_,"\ncoef-cor with Gene1 = ", round(cor_res$r["Gene1",Gene], digit=3),"\np-cor with Gene1 = ", round(cor_res$P["Gene1",Gene], digit=3)),
+               subtitle = paste0("effect size=",effect_truth_,";\nallele frequency=",allele_freq_),
+               x = paste0("Genotype Dosage"), y = paste0("Gene Expression (",Gene,")")) +
+          facet_wrap(~cell_type, scales = "free_y", ncol = 5)  +
+          geom_text(data = regression_results, aes(x = x, y = y, label = lab, group = cluster), 
+                    color = "black", vjust = 1, inherit.aes = FALSE)
+      )
+      
+    }
+  }
+}
+
+
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=6, fig.height=3}
+
+# for(Gene in paste0("Gene",1:ncol(simulation_counts))){
+for(Gene in paste0("Gene2")){
+  for(effect_truth_ in cor_vals){
+    for(allele_freq_ in allele_freqs){
+      data = genotype_df_list[[paste0(effect_truth_,"_",allele_freq_)]] %>%
+        magrittr::set_colnames(bulk_df[bulk_df$cell_type == eqtl_celltype, "subject_id"]) %>%
+        magrittr::set_rownames(paste0("dosage",1:n_snps)) %>%
+        t() %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "subject_id") %>%
+        dplyr::left_join(bulk_df, ., by = "subject_id") %>%
+        dplyr::distinct(subject_id, cell_type, sex, age, bmi, batch, disease, eval(parse(text=(Gene))), eval(parse(text=(snp)))) %>%
+        magrittr::set_colnames(c("subject_id", "cell_type", "sex", "age", "bmi", "batch", "disease", "Gene", "dosage"))
+      
+      regression_results <- output_all_pbeqtl_summary %>%
+        as.data.frame() %>%
+        dplyr::filter(effect_truth == effect_truth_, allele_freq == allele_freq_, gene == Gene) %>%
+        dplyr::distinct(cluster, median_beta, median_pvalue) %>%
+        dplyr::mutate(x=2,y=Inf,
+                      lab = paste0("β = ", round(median_beta, 3), "\np = ", format.pval(median_pvalue, digits = 3)),
+                      cell_type = factor(cluster))
+      plot(
+        ggplot(data, 
+               aes(x = as.factor(dosage), y = Gene, color = cell_type)) +
+          geom_boxplot(outlier.shape = NA) +
+          geom_jitter(alpha = 0.5, size = 0.5, aes(fill = cell_type)) +
+          geom_smooth(method = "lm", aes(group = cell_type), se = FALSE, color = "black") +
+          theme_minimal() +
+          theme(legend.position = "none") +
+          labs(title = paste0("eQTL Boxplot for cell clusters for ", Gene),
+               #subtitle = paste0("effect size (Gene1)=",effect_truth_,";\nallele frequency=",allele_freq_,"\ncoef-cor with Gene1 = ", round(cor_res$r["Gene1",Gene], digit=3),"\np-cor with Gene1 = ", round(cor_res$P["Gene1",Gene], digit=3)),
+               subtitle = paste0("effect size=",effect_truth_,";\nallele frequency=",allele_freq_),
+               x = paste0("Genotype Dosage"), y = paste0("Gene Expression (",Gene,")")) +
+          facet_wrap(~cell_type, scales = "free_y", ncol = 5)  +
+          geom_text(data = regression_results, aes(x = x, y = y, label = lab, group = cluster), 
+                    color = "black", vjust = 1, inherit.aes = FALSE)
+      )
+      
+    }
+  }
+}
+
+```
+
+# Prepare hPCs and NAMPCs for GxC interaction test 
+
+```{r, message=FALSE, warning=FALSE}
+
+meta_data$batch = as.character(meta_data$batch)
+table(meta_data$batch, meta_data$subject_id) 
+
+set.seed(1234)
+harmony_embeddings_all <- HarmonyMatrix(as.matrix(pca_res$x), 
+                                        meta_data, 
+                                        vars_use  = c('batch',"subject_id"),
+                                        do_pca=FALSE)
+
+meta_data$sex_val = as.integer(meta_data[,sex_col])
+set.seed(1234)
+NAMsvd = create_NAM(meta_data,
+                    harmony_embeddings_all,
+                    samplem_key = 'subject_id',
+                    covs = c("age","sex_val","bmi") ,
+                    graph_use = 'RNA_snn',
+                    batches = "batch",
+                    nsteps = NULL,
+                    verbose=FALSE,
+                    assay=NULL,
+                    key='NAMPC_'
+)
+NAMsvd$varexp
+names(NAMsvd) = c("sampleXpc","svs","nbhdXpc","varexp")
+NAM = NAMsvd$nbhdXpc
+colnames(NAM) = paste0("NAM",colnames(NAM))
+dim(NAM)
+
+
+
+```
+
+
+
+```{r, fig.width=4, fig.height=4}
+
+plot_nam <- function (umap, exprs, pct = 0.95, title)
+{
+    max.cutoff = quantile(exprs, pct)
+    min.cutoff = quantile(exprs, 1 - pct)
+    tmp <- sapply(X = exprs, FUN = function(x) {
+        return(ifelse(test = x > max.cutoff, yes = max.cutoff,
+            no = x))
+    })
+    tmp <- sapply(X = tmp, FUN = function(x) {
+        return(ifelse(test = x < min.cutoff, yes = min.cutoff,
+            no = x))
+    })
+    umap_res_plot <- cbind(umap, exp = tmp) %>% magrittr::set_colnames(c("UMAP1","UMAP2",title))
+    set.seed(1234)
+    return(ggplot(data = as.data.frame(umap_res_plot)[sample(nrow(umap_res_plot)),
+        ], aes(x = UMAP1, y = UMAP2)) + ggrastr::geom_point_rast(mapping = aes_string(color = title),
+        shape = ".") + scale_color_distiller(palette = "RdYlBu") + theme_classic() + theme(axis.text = element_blank(),
+        axis.title = element_blank()))
+}
+
+
+lapply(1:ncol(harmony_embeddings_all), function(i) {
+  nam_col <- paste0("PC", i)  
+  plot_nam(umap_res_fromCount, harmony_embeddings_all[,nam_col], 1, nam_col)
+})
+
+
+lapply(1:ncol(NAM), function(i) {
+  nam_col <- paste0("NAMPC", i)  
+  plot_nam(umap_res_fromCount, NAM[,nam_col], 1, nam_col)
+})
+
+
+
+```
+
+# Single-cell eQTL analysis with interaction terms
+
+```{r}
+output_all_sceqtl=data.frame()
+
+
+for(Gene in paste0("Gene1")){
+  #for(Gene in paste0("Gene",1:ncol(simulation_counts))){
+  message("Gene = ",Gene,";")
+  
+  for(effect_truth_ in cor_vals){
+    for(allele_freq_ in allele_freqs){
+      for(LV in c("hPC", "NAMPC", "sPC", "Null")){
+        for(MODEL in c("poisson", "ngb")){
+          
+          # sPC: PCs from count data before removing batch effects(if batch_ratio > 0)
+          # NAMPC: Neighborhood-association matrix PCs after batch effect correction
+          # hPC: harmonized PCs after batch effect correction
+          # MOFA: Multi-Omics Factor Analysis
+          # Null: random numeric values
+          
+          message("\n##########\n")
+          message("effect_truth = ",effect_truth_,";")
+          message("allele_freq = ", allele_freq_ ,";")
+          message("LV = ", LV)
+          message("MODEL = ", MODEL)
+          message(paste0(Sys.time()))
+          message("\n##########\n")
+          
+          # データの前処理
+          data = dplyr::left_join(
+            cbind(simulation_counts,
+                  meta_data),
+            genotype_df_list[[paste0(effect_truth_,"_",allele_freq_)]] %>%
+              magrittr::set_colnames(bulk_df[bulk_df$cell_type == eqtl_celltype, "subject_id"]) %>%
+              magrittr::set_rownames(paste0("dosage",1:n_snps)) %>%
+              na.omit() %>%
+              t() %>%
+              as.data.frame() %>%
+              tibble::rownames_to_column(var = "subject_id"),
+            by = "subject_id")
+          nrow(data)==nrow(meta_data)
+          
+          ds_logi = meta_data$cell_type %in% unique(meta_data$cell_type)
+          # if you want to save time, filter cells in positive control cell type and 3 negative control cell types(including both major and minor cell types)
+          #ds_logi = meta_data$cell_type %in% c("A","B","H","J")
+          data = data[ds_logi, ]
+          
+          snps = grep("^dosage", colnames(data), value = TRUE)
+          data <- data[, c(Gene, samplem_key, batch_col, age_col, sex_col, "nUMI", snps)]
+          data$nUMI <- scale(log(data$nUMI + 1))
+          
+          cl <- makeCluster(n_thread)
+          registerDoParallel(cl)
+          clusterExport(cl, c("data", "Gene", "LV", "MODEL", "effect_truth_", "allele_freq_"))
+          output_all_sceqtl_tmp <- foreach(snp = snps, .combine = rbind, .packages = c("lme4", "broom.mixed", "dplyr", "tibble")) %dopar% {
+            tryCatch({
+              
+              # message(paste("SNP =", snp))
+              E <- as.numeric(data[, Gene])
+              IND <- factor(data[, samplem_key])
+              G <- factor(data[, snp])
+              B <- factor(data[, batch_col])
+              AGE <- scale(data[, age_col])
+              SEX <- scale(as.integer(data[, sex_col]))
+              expPC <- pca_res$x
+              
+              if(LV == "Null"){
+                set.seed(grep(paste0("^",snp,"$"),snps))
+                NullMat <- matrix(runif(nrow(meta_data) *(n_dim*2)), nrow = nrow(meta_data), ncol = n_dim*2)
+                NullMat <- irlba::irlba(NullMat, nv = n_dim)
+                NullMat <- NullMat$u
+                colnames(NullMat) = paste0("Null",1:ncol(NullMat))
+              }
+              
+              # Load interaction covariates (e.g., batch-corrected CVs from CCA)
+              cov <- switch(LV,
+                            "NAMPC" = NAM,
+                            "hPC" = harmony_embeddings_all,
+                            "sPC" = pca_res$x,
+                            "MOFA" = mofa_factors,
+                            "Null" = NullMat
+              )
+              n_dim <- ncol(cov)
+              cov <- cov[, 1:n_dim]
+              colnames(cov) <- paste0(LV, 1:n_dim)
+              prefix <- LV
+              
+              data_model <- data.frame(E, G = as.integer(G), IND, B, AGE, SEX, 
+                                       expPC[ds_logi,], cov[ds_logi,])
+              
+              if(MODEL == "poisson"){
+                full_model <- lme4::glmer(
+                  formula = as.formula(paste0("E ~ G + #(1 | B) + 
+                                              (1 | IND) + AGE + SEX + ", paste(colnames(expPC), collapse = " + "), " + ", paste(colnames(cov), collapse = " + "),  " + ", paste0("G:", colnames(cov), collapse = " + "))),
+                  family = "poisson", nAGQ = 0, data = data_model, control = glmerControl(optimizer = "nloptwrap")
+                )
+                null_model <- lme4::glmer(
+                  formula = as.formula(paste0("E ~ G + #(1 | B) + 
+                                              (1 | IND) + AGE + SEX + ", paste(colnames(expPC), collapse = " + "), " + ", paste(colnames(cov), collapse = " + "))),
+                  family = "poisson", nAGQ = 0, data = data_model, control = glmerControl(optimizer = "nloptwrap")
+                )
+              } else if (MODEL == "ngb"){
+                full_model <- lme4::glmer.nb(
+                  formula = as.formula(paste0("E ~ G + #(1 | B) + 
+                                                (1 | IND) + AGE + SEX + ", paste(colnames(expPC), collapse = " + "), " + ", paste(colnames(cov), collapse = " + "),  " + ", paste0("G:", colnames(cov), collapse = " + "))),
+                  nAGQ = 0, data = data_model, control = glmerControl(optimizer = "nloptwrap")
+                )
+                null_model <- lme4::glmer.nb(
+                  formula = as.formula(paste0("E ~ G + #(1 | B) + 
+                                                (1 | IND) + AGE + SEX + ", paste(colnames(expPC), collapse = " + "), " + ", paste(colnames(cov), collapse = " + "))),
+                  nAGQ = 0, data = data_model, control = glmerControl(optimizer = "nloptwrap")
+                )
+                
+              }
+              model_lrt <- anova(null_model, full_model, test = "LRT")
+              
+              contrast_lvl2 <- c("G", "AGE", "SEX", paste0("G:", colnames(cov)))
+              contrast_ci <- confint.merMod(full_model, method = "Wald", parm = contrast_lvl2)
+              
+              output <- data.frame(
+                Gene = Gene,
+                SNP = snp,
+                term = contrast_lvl2,
+                model.pvalue = model_lrt[["Pr(>Chisq)"]][2], 
+                model.qvalue = ifelse(model_lrt[["Pr(>Chisq)"]][2]*n_dim>1, 1, model_lrt[["Pr(>Chisq)"]][2]*n_dim), # Bonferroni correction
+                row.names = contrast_lvl2
+              )
+              
+              output[, "Estimate"] <- fixef(full_model)[contrast_lvl2]
+              output[, paste("Estimate", "95pct.ci.lower", sep = ".")] <- contrast_ci[contrast_lvl2, "2.5 %"]
+              output[, paste("Estimate", "95pct.ci.upper", sep = ".")] <- contrast_ci[contrast_lvl2, "97.5 %"]
+              
+              output <- cbind(
+                output,
+                broom.mixed::tidy(full_model) %>%
+                  dplyr::filter(term %in% contrast_lvl2) %>%
+                  tibble::column_to_rownames("term") %>%
+                  .[contrast_lvl2, c("std.error", "effect", "statistic", "p.value")]
+              )
+              
+              output <- output %>%
+                dplyr::mutate(LV = LV,
+                              effect_truth = effect_truth_,
+                              allele_freq = allele_freq_,
+                              MODEL = MODEL)
+              
+              output
+            }, error = function(e) {
+              message("Error processing SNP: ", snp, "; Error message: ", e$message)
+              return(data.frame(
+                Gene = Gene,
+                SNP = snp,
+                term = NA,
+                model.pvalue = NA,
+                model.qvalue = NA,
+                Estimate = NA,
+                Estimate.95pct.ci.lower = NA,
+                Estimate.95pct.ci.upper = NA,
+                std.error = NA,
+                effect = NA,
+                statistic = NA,
+                p.value = NA,
+                LV = LV,
+                effect_truth = effect_truth_,
+                allele_freq = allele_freq_,
+                MODEL = MODEL
+              ))
+            })
+          }
+          stopCluster(cl)
+          
+          if (!is.null(output_all_sceqtl_tmp)) {
+            output_all_sceqtl = rbind(output_all_sceqtl_tmp %>%
+                                        dplyr::mutate(LV = LV,
+                                                      effect_truth = effect_truth_,
+                                                      allele_freq = allele_freq_,
+                                                      Nind = n_individuals,
+                                                      Ncell = n_cells,
+                                                      VarCluster = cluster_ratio,
+                                                      VarBatch = batch_ratio,
+                                                      Nsnps = n_snps,
+                                                      MODEL = MODEL
+                                        ), 
+                                      output_all_sceqtl)
+          } else {
+            output_all_sceqtl = rbind(data.frame(), output_all_sceqtl)
+          }
+          message(paste0(Sys.time()))
+          
+        }
+      }
+    }
+  }
+}
+
+
+```
+
+
+## Check power for GxC interaction test
+
+```{r, message=FALSE, warning=FALSE,fig.width=11, fig.height=5}
+
+GENE="Gene1"
+
+output_all_sceqtl %>%
+  dplyr::filter(Gene==GENE) %>%
+  dplyr::distinct(Gene, SNP, LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch, .keep_all = TRUE) %>%
+  dplyr::group_by(Gene,      LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch) %>%
+  dplyr::summarize(median_pvalue = median(model.pvalue, na.rm=TRUE),
+                   power = mean(model.pvalue < 0.05, na.rm=TRUE),
+                   se_median = median(std.error, na.rm=TRUE),  
+                   .groups = 'drop') %>%
+  dplyr::mutate(
+    n = n_snps,  
+    z = qnorm(0.975),  
+    power_ci_lower = (power + z^2/(2*n) - z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+    power_ci_upper = (power + z^2/(2*n) + z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n)
+  ) %>%
+  dplyr::select(-n, -z, -se_median) %>%
+  as.data.frame()
+
+output_all_sceqtl_summary <- output_all_sceqtl %>%
+  dplyr::filter(Gene==GENE) %>%
+  dplyr::distinct(Gene, SNP, LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch, .keep_all = TRUE) %>%
+  dplyr::group_by(Gene,      LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch) %>%
+  dplyr::summarize(median_pvalue = median(model.pvalue, na.rm=TRUE),
+                   power = mean(model.pvalue < 0.05, na.rm=TRUE),
+                   se_median = median(std.error, na.rm=TRUE), 
+                   .groups = 'drop') %>%
+  dplyr::mutate(
+    n = n_snps,  
+    z = qnorm(0.975),  
+    power_ci_lower = (power + z^2/(2*n) - z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+    power_ci_upper = (power + z^2/(2*n) + z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n)
+  ) %>%
+  dplyr::select(-n, -z, -se_median) %>%
+  as.data.frame() %>%
+  dplyr::mutate(group = paste0("Eff=",effect_truth, "; MAF=",allele_freq, "; Ncell=",Ncell, "; Nind=",Nind, "; VarCluster=",VarCluster, "; VarBatch=",VarBatch))
+
+# for(Gene in paste0("Gene",1:ncol(simulation_counts))){
+for(Gene in paste0("Gene1")){
+  
+  plot(
+    ggplot(output_all_sceqtl_summary, 
+           aes(x=group, y=power)) +
+      geom_bar(stat="identity", position=position_dodge(), fill="skyblue") +
+      geom_errorbar(aes(ymin=power_ci_lower, ymax=power_ci_upper), width=.2, position=position_dodge(.9)) +
+      coord_flip() +
+      facet_grid(MODEL ~ LV) +
+      theme_minimal() +
+      geom_hline(yintercept = c(0.8), linetype="dashed", color="red") +
+      theme() +
+      labs(x="Setting", y="Power", title="Power by Setting",
+           #subtitle = paste0(GENE,"\ncoef-cor with Gene1 = ", round(cor_res$r["Gene1",GENE], digit=3),"\np-cor with Gene1 = ", round(cor_res$P["Gene1",GENE], digit=3))
+           subtitle = paste0(GENE)
+           )
+  )
+  
+}
+
+```
+
+```{r, fig.width=8, fig.height=8, message=FALSE, warning=FALSE}
+
+GENE="Gene1"
+output_all_sceqtl %>%
+  dplyr::filter(Gene==GENE) %>%
+  dplyr::distinct(Gene, SNP, LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch, .keep_all = TRUE) %>%
+  dplyr::group_by(Gene,      LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch) %>%
+  dplyr::summarize(median_pvalue = median(model.pvalue, na.rm=TRUE),
+                   power = mean(model.pvalue < 0.05, na.rm=TRUE),
+                   se_median = median(std.error, na.rm=TRUE),  
+                   .groups = 'drop') %>%
+  dplyr::mutate(
+    n = n_snps, 
+    z = qnorm(0.975), 
+    power_ci_lower = (power + z^2/(2*n) - z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n),
+    power_ci_upper = (power + z^2/(2*n) + z * sqrt((power * (1 - power) + z^2 / (4*n)) / n)) / (1 + z^2 / n)
+  ) %>%
+  dplyr::select(-n, -z, -se_median) %>%
+  as.data.frame() %>%
+  dplyr::mutate(LV = factor(LV),
+                MODEL = factor(MODEL),
+                VarCluster = factor(paste0("VarCluster=",VarCluster)),
+                VarBatch = factor(paste0("VarBatch=",VarBatch)),
+                Nind = factor(paste0("Nind=",Nind)),
+                Ncell = factor(paste0("Ncell=",Ncell)),
+                allele_freq = factor(paste0("MAF=",allele_freq))) %>%
+  ggplot(., aes(x=effect_truth, y=power)) +
+  geom_line(aes(color=as.factor(allele_freq))) +
+  geom_ribbon(aes(ymin=power_ci_lower, ymax=power_ci_upper, fill = as.factor(allele_freq)), alpha=0.5) +  # Alpha for transparency
+  geom_point(aes(color=as.factor(allele_freq))) +
+  geom_hline(yintercept = 0.8, linetype="dashed") +
+  facet_grid(LV + MODEL ~ allele_freq + Nind + Ncell + VarCluster + VarBatch) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(title = "Power of sceQTL detection",
+       x = "Correlation",
+       y = "Power")
+
+```
+
+
+```{r, fig.width=20, fig.height=8, message=FALSE, warning=FALSE}
+GENE="Gene1"
+
+output_all_sceqtl %>%
+  dplyr::filter(Gene==GENE) %>%
+  dplyr::distinct(Gene,SNP,model.pvalue, LV, MODEL, effect_truth, allele_freq, Nind, Ncell, VarCluster, VarBatch) %>%
+  dplyr::mutate(LV = factor(LV),
+                MODEL = factor(MODEL),
+                VarCluster = factor(paste0("VarCluster=",VarCluster)),
+                VarBatch = factor(paste0("VarBatch=",VarBatch)),
+                Nind = factor(paste0("Nind=",Nind)),
+                Ncell = factor(paste0("Ncell=",Ncell)),
+                allele_freq = factor(paste0("MAF=",allele_freq)),
+                effect_truth = factor(paste0("Eff=",effect_truth))) %>%
+  ggplot(., 
+         aes(x = model.pvalue)) +
+  geom_density(aes(fill = LV), alpha = 0.5) +
+  facet_grid(LV + MODEL ~ effect_truth + allele_freq + Nind + Ncell + VarCluster + VarBatch, scales = "free") +
+  labs(title = "Density plot of model.pvalue",
+       x = "Model P-value",
+       y = "Density") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+```{r, fig.width=4, fig.height=4, message=FALSE, warning=FALSE}
+
+snp="dosage1"
+
+for(effect_truth_ in cor_vals){
+  for(allele_freq_ in allele_freqs){
+    for(LV_type in c("hPC", "NAMPC", "sPC", "MOFA", "Null")){
+      for(MODEL_type in c("poisson", "ngb")){
+        tryCatch({
+          
+        if(LV_type == "Null"){
+          set.seed(grep(paste0("^",snp,"$"),snps))
+          NullMat <- matrix(runif(nrow(meta_data) *(n_dim*2)), nrow = nrow(meta_data), ncol = n_dim*2)
+          NullMat <- irlba::irlba(NullMat, nv = n_dim)
+          NullMat <- NullMat$u
+          colnames(NullMat) = paste0("Null",1:ncol(NullMat))
+        }
+        
+        # Load interaction covariates (e.g., batch-corrected CVs from CCA)
+        cov <- switch(LV_type,
+                      "NAMPC" = NAM,
+                      "hPC" = harmony_embeddings_all,
+                      "sPC" = pca_res$x,
+                      "MOFA" = mofa_factors,
+                      "Null" = NullMat
+        )
+        n_dim <- ncol(cov)
+        colnames(cov) <- paste0(LV_type, 1:n_dim)
+        prefix <- LV_type
+        
+        # Load eQTL results, CV scores, and UMAP coordinates
+        
+        sceqtl_results <- output_all_sceqtl %>%
+          dplyr::filter(LV == LV_type & MODEL == MODEL_type & effect_truth == effect_truth_ & allele_freq == allele_freq_) %>% 
+          dplyr::filter(SNP == snp & Gene == Gene) %>%
+          dplyr::distinct(term, .keep_all=TRUE)
+        nam_scores <- cov[,1:n_dim]
+        
+        # Calculate single-cell betas
+        
+        betas <- output_all_sceqtl %>% 
+          dplyr::filter(grepl("^G",term))  %>%
+          dplyr::filter(SNP == snp & Gene == Gene & LV == LV_type & MODEL == MODEL_type & effect_truth == effect_truth_ & allele_freq == allele_freq_) %>%
+          dplyr::select(Estimate) %>% unlist
+        
+        sc_betas <- t(data.frame(X1 = rowSums(sweep(cbind(1, nam_scores), MARGIN=2, betas, `*`))))
+        #head(sc_betas[,1:5])
+        #summary(t(sc_betas))
+        hist(sc_betas)
+        
+        plot_eqtl <- function (ab, umap, exprs, pct = 0.95, geno, LV_type, MODEL_type)
+        {
+          max.cutoff = quantile(exprs[ab, ], pct)
+          min.cutoff = quantile(exprs[ab, ], 1 - pct)
+          tmp <- sapply(X = exprs[ab, ], FUN = function(x) {
+            return(ifelse(test = x > max.cutoff, yes = max.cutoff,
+                          no = x))
+          })
+          tmp <- sapply(X = tmp, FUN = function(x) {
+            return(ifelse(test = x < min.cutoff, yes = min.cutoff,
+                          no = x))
+          })
+          umap_res_plot <- cbind(umap, tmp) %>% magrittr::set_colnames(c("UMAP1","UMAP2","beta"))
+          return(ggplot(data = as.data.frame(umap_res_plot)[sample(nrow(umap_res_plot)),
+          ], aes(x = UMAP1, y = UMAP2)) + ggrastr::geom_point_rast(mapping = aes(color = beta),
+                                                                   shape = ".") + 
+            labs(title = "total beta",
+                 subtitle = paste0(LV_type,"\n",MODEL_type)) + 
+            scale_color_distiller(palette = "RdYlBu",
+                                  limits = c(geno - max(abs(geno - tmp)), 
+                                             geno + max(abs(geno - tmp)))) + 
+            theme_classic() + 
+            theme(axis.text = element_blank(),
+                  axis.title = element_blank()))
+        }
+        
+        plot(plot_eqtl("X1", umap_res_fromCount, sc_betas, 0.95, betas[1], LV_type, MODEL_type))
+        
+        # by cluster
+        plot(
+          data.frame(cluster = meta_data$cell_type, beta = t(sc_betas)) %>%
+            tidyr::pivot_longer(!cluster) %>%
+            magrittr::set_colnames(c("cluster","marker","expression")) %>%
+            dplyr::mutate(marker = "eQTL effect") %>% 
+            ggplot(.,aes(x=cluster, y=expression, fill = cluster)) + 
+            geom_violin(color = "black", aes(fill = cluster), scale = "width", draw_quantiles = c(0.5)) +
+            geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+            facet_wrap(marker ~ ., scales = "free" , nrow = 3) +
+            theme_classic() +
+            coord_flip() +
+            theme(strip.text.x=element_text(size=15, color="black", face="bold"),
+                  strip.text.y=element_text(size=15, color="black", face="bold"),
+                  legend.position = "none",
+                  plot.title = element_text(size=15),
+                  axis.title.x = element_text(size=15),
+                  axis.title.y = element_text(size =15),
+                  axis.text.y = element_text(size = 15),
+                  axis.text.x = element_text(size = 15),
+                  legend.text =  element_text(size = 15),
+                  legend.key.size = grid::unit(0.5, "lines"),
+                  legend.title = element_text(size = 0.8, hjust = 0)) +
+            labs(title = paste0("LV=",LV_type,";\nmodel=",MODEL_type,";\neffect_truth=",effect_truth_,";\nallele_freq=",allele_freq_),
+                 x = "cluster",
+                 y = "beta") 
+        )
+        
+        # by sample
+        plot(
+          data.frame(cluster = meta_data$subject_id, beta = t(sc_betas)) %>%
+            tidyr::pivot_longer(!cluster) %>%
+            magrittr::set_colnames(c("cluster","marker","expression")) %>%
+            dplyr::mutate(marker = "eQTL effect") %>% 
+            ggplot(.,aes(x=cluster, y=expression, fill = cluster)) + 
+            geom_violin(color = "black", aes(fill = cluster), scale = "width", draw_quantiles = c(0.5), size = 0.15) +
+            facet_wrap(marker ~ ., scales = "free" , nrow = 3) +
+            theme_classic() +
+            coord_flip() +
+            theme(strip.text.x=element_text(size=15, color="black", face="bold"),
+                  strip.text.y=element_text(size=15, color="black", face="bold"),
+                  legend.position = "none",
+                  plot.title = element_text(size=15),
+                  axis.title.x = element_text(size=15),
+                  axis.title.y = element_text(size =15),
+                  axis.text.y = element_blank(),
+                  axis.text.x = element_text(size = 15),
+                  legend.text =  element_text(size = 15),
+                  legend.key.size = grid::unit(0.5, "lines"),
+                  legend.title = element_text(size = 0.8, hjust = 0)) +
+            labs(title = paste0("LV=",LV_type,";\nmodel=",MODEL_type,";\neffect_truth=",effect_truth_,";\nallele_freq=",allele_freq_),
+                 x = "sample",
+                 y = "beta") 
+        )
+        
+        }, error = function(e) {
+          # message("Error processing SNP: ", snp, "; Error message: ", e$message)
+        })
+      }
+    }
+  }
+}
+
+
+```
+
+

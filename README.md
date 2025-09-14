@@ -13,6 +13,13 @@ if (!require("remotes")) {
 remotes::install_github("juninamo/SimSCEQTL")
 ```
 
+## Features
+See the vignette for details:
+
+- Generate simulation single-cell data with metadata
+- Generate paired genotype data
+
+
 ## 📝 Citation 
 Jun Inamo, et al. XXX. [*medRxiv XXXX*](https://XXX), doi:[https://doi.org/XXX](https://doi.org/XXX)
 

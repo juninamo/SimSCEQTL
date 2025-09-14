@@ -1,0 +1,521 @@
+---
+title: "Code for interaction effect on cell type abundance"
+author: 
+  name: Jun Inamo
+  email: juninamo@keio.jp
+  affiliation: Department of Microbiology and Immunology, Keio University School of Medicine, Tokyo, Japan
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  BiocStyle::html_document:
+    toc_float: true
+params:
+  n_thread: 14 
+  n_cells: 100
+  n_individuals: 200 
+  cluster_ratio: 0.65
+  batch_ratio: 0
+---
+
+```{r, echo=FALSE, results="hide", message=FALSE}
+knitr::opts_chunk$set(error=FALSE, message=FALSE, warning=FALSE)
+# BiocManager::install("BiocStyle")
+library(BiocStyle)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+library(SimSCEQTL)
+
+suppressWarnings({
+  library(dplyr)
+  library(tidyr)
+  library(tidyverse)
+
+  library(MASS)
+  library(caret)
+  
+  library(Seurat)
+  library(presto)
+  library(ggplot2)
+  library(ggrepel)
+  library(glue)
+  
+  library(stevemisc)
+  library(stevedata)
+  library(lme4)
+  library(broom.mixed)
+
+  library(doParallel)
+  library(pbapply)
+  library(variancePartition)
+  library(data.table)
+  library(MatrixEQTL)
+  library(harmony)
+  library(foreach)
+  library(parallel)
+
+})
+
+```
+
+
+# Simulation of 
+
+
+# Set parameters
+
+```{r, eval=FALSE}
+params <- list(
+  n_thread = 14,
+  n_cells = 100,
+  n_individuals = 200,
+  cluster_ratio = 0.65,
+  batch_ratio = 0
+)
+```
+
+```{r}
+n_thread=params$n_thread
+registerDoParallel(cores = n_thread)  # use forking with X cores
+
+# parameters for generating dummy dataset
+n_cells=params$n_cells # cells per major cell type
+sd_celltypes=0.1  # standard deviation of number of cells 
+n_major_cell_types=3 # number of major cell types
+n_minor_cell_types=1 # number of minor cell types
+relative_abundance=0.4 # ratio between major and rare
+n_individuals=params$n_individuals # total individuals
+n_batchs=4 # total batches
+prop_sex=0.5 # proportion of female
+prop_disease=0.5  # proportion of case
+interaction_feature_1="sex"
+interaction_feature_2="disease"
+# interaction_feature_1="age"
+# interaction_feature_2="bmi"
+fc_interact=0.5 # additional FC of specified cell types which are from people with case groups compared to control groups (e.g., if you specify 0.5, FC comparing increased cell type between case and control groups will be 1.5 in total)
+interaction_type = c("specific") # c("specific","differential","opposite")
+n_major_interact_celltypes=1 # number of major cell types which are differentially abundant between two groups. This parameter is effective only when fc_increase > 0
+n_minor_interact_celltypes=1 # number of minor cell types which are differentially abundant between two groups. This parameter is effective only when fc_increase > 0
+
+print(paste0("n_thread: ", n_thread))
+print(paste0("n_cells: ", n_cells))
+print(paste0("sd_celltypes: ", sd_celltypes))
+print(paste0("n_major_cell_types: ", n_major_cell_types))
+print(paste0("n_minor_cell_types: ", n_minor_cell_types))
+print(paste0("relative_abundance: ", relative_abundance))
+print(paste0("n_major_diff_celltypes: ", n_major_interact_celltypes))
+print(paste0("n_minor_diff_celltypes: ", n_minor_interact_celltypes))
+print(paste0("n_individuals: ", n_individuals))
+print(paste0("n_batchs: ", n_batchs))
+print(paste0("prop_sex: ", prop_sex))
+print(paste0("prop_disease: ", prop_disease))
+print(paste0("fc_interact: ", fc_interact))
+print(paste0("interaction_type: ", interaction_type))
+
+
+n_features = 200
+cluster_features = 1:50
+disease_features = 1:50
+sex_features = 1:50 # seq(2, 20, by = 2)
+age_features = 1:50 # seq(2, 10, by = 2)
+bmi_features = 1:50 # seq(11, 20, by = 2)
+batch_features = 1:100 # seq(1, 20,by = 2)
+individual_features = 1:100 # seq(1, 20,by = 2)
+
+# Define the maximum variance in features of each attribute
+cluster_ratio = params$cluster_ratio
+disease_ratio = 0.01
+sex_ratio = 0.01 # 0.05
+age_ratio = 0.01 # 0.05
+bmi_ratio = 0.01 # 0.05
+batch_ratio = params$batch_ratio # 0.1
+individual_ratio = 0.01 # 0.1
+
+n_pcs = 20
+
+ratio_variance = 0.1
+
+cluster_col = "cell_type"
+sex_col = "sex"
+age_col = "age"
+bmi_col = "bmi"
+batch_col = "batch"
+disease_col = "disease"
+individual_col = 'subject_id'
+
+# parameters for UMAP
+n_neighbors = 30
+metric = "cosine"
+min_dist = 0.01
+
+samplem_key = 'subject_id'
+
+# parameters for eQTL
+eqtl_celltype = "A" # major cell type
+eqtl_gene = "Gene1" # gene to be tested for eQTL
+cor_vals = c(0, 0.15, 0.3) # correlation coefficients to be tested between expression of eqtl_gene in eqtl_celltype and genotype (dosage)
+allele_freqs = c(0.05, 0.3) # allele frequencies to be tested
+n_snps = 100 # number of simulation SNPs
+dist_type = "nb" # c("nb","poisson") # distribution of simulated counts. nb= negative binomial, poisson= Poisson distribution
+seed = 1234
+
+```
+
+# Generating dummy metadata and feature matrix
+
+
+```{r, warning=FALSE}
+# Generate simulated data
+datasets = generate_data_interaction(n_cells = n_cells,
+                                     sd_celltypes = sd_celltypes, 
+                                     n_major_cell_types = n_major_cell_types,
+                                     n_minor_cell_types = n_minor_cell_types,
+                                     relative_abundance = relative_abundance, 
+                                     n_major_interact_celltypes = n_major_interact_celltypes,
+                                     n_minor_interact_celltypes = n_minor_interact_celltypes,
+                                     interaction_feature_1 = interaction_feature_1,
+                                     interaction_feature_2 = interaction_feature_2,
+                                     interaction_type = interaction_type,
+                                     
+                                     n_individuals = n_individuals,
+                                     n_batchs = n_batchs,
+                                     prop_sex = prop_sex, 
+                                     prop_disease = prop_disease, 
+                                     fc_interact = fc_interact,
+                                     
+                                     n_features = n_features, 
+                                     cluster_features = cluster_features,
+                                     disease_features = disease_features,
+                                     sex_features = sex_features, 
+                                     age_features = age_features,
+                                     bmi_features = bmi_features,
+                                     batch_features = batch_features,
+                                     individual_features = individual_features,
+                                     
+                                     cluster_ratio = cluster_ratio,
+                                     disease_ratio = disease_ratio,
+                                     sex_ratio = sex_ratio,
+                                     age_ratio = age_ratio,
+                                     bmi_ratio = bmi_ratio,
+                                     batch_ratio = batch_ratio,
+                                     individual_ratio = individual_ratio,
+                                     
+                                     ratio_variance = ratio_variance,
+                                     
+                                     cluster_col = cluster_col,
+                                     sex_col = sex_col,
+                                     age_col = age_col,
+                                     bmi_col = bmi_col,
+                                     batch_col = batch_col,
+                                     disease_col = disease_col,
+                                     individual_col = individual_col,
+                                     
+                                     dist_type = dist_type,
+                                     eqtl_celltype = eqtl_celltype, 
+                                     eqtl_gene = eqtl_gene,
+                                     cor_vals = cor_vals,
+                                     allele_freqs = allele_freqs,
+                                     n_snps = n_snps, 
+                                     
+                                     seed = seed,
+                                     n_thread = n_thread,
+                                     verbose = TRUE
+                                     
+)
+
+```
+
+```{r}
+meta_data = datasets$dummy_data
+head(meta_data)
+dim(meta_data)
+
+```
+
+
+## Inspect the generated data
+
+```{r, fig.width=10, fig.height=6}
+
+meta_data %>%
+  dplyr::group_by(subject_id,sex,disease,cell_type) %>%
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::group_by(subject_id,sex,disease) %>%
+  dplyr::mutate(proportion = 100*count/sum(count),
+                sex_label = ifelse(sex=="0","Male","Female"),
+                disease_label = ifelse(disease=="0","Control","Disease")) %>%
+  ggplot(.,aes(x=disease_label,y=proportion,color = disease_label)) +
+  geom_boxplot() +
+  geom_point(position=position_jitterdodge(0.9)) +
+  ggpubr::stat_compare_means(comparisons = list(c("Control","Disease")), 
+                             label = "{p.adj}{p.adj.signif}", method = "wilcox.test", label.y.npc = 0.4, tip.length = 0) +
+  scale_color_manual(values = c(
+    "Control" = "#4DAF4A",
+    "Disease" = "#984EA3")) +
+  ggh4x::facet_nested_wrap(vars(cell_type, sex_label), nrow = 1) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+        legend.text =  element_text(size = 15),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 0.8, hjust = 0)) +
+  labs(
+    x = "Disease status",
+    y = "Proportion (%)",
+    title = ""
+  )  
+
+```
+
+
+# Null model (no interaction effect)
+
+```{r}
+fc_interact=0
+```
+
+
+
+```{r, warning=FALSE}
+# Generate simulated data
+datasets = generate_data_interaction(n_cells = n_cells,
+                                     sd_celltypes = sd_celltypes, 
+                                     n_major_cell_types = n_major_cell_types,
+                                     n_minor_cell_types = n_minor_cell_types,
+                                     relative_abundance = relative_abundance, 
+                                     n_major_interact_celltypes = n_major_interact_celltypes,
+                                     n_minor_interact_celltypes = n_minor_interact_celltypes,
+                                     interaction_feature_1 = interaction_feature_1,
+                                     interaction_feature_2 = interaction_feature_2,
+                                     interaction_type = interaction_type,
+                                     
+                                     n_individuals = n_individuals,
+                                     n_batchs = n_batchs,
+                                     prop_sex = prop_sex, 
+                                     prop_disease = prop_disease, 
+                                     fc_interact = fc_interact,
+                                     
+                                     n_features = n_features, 
+                                     cluster_features = cluster_features,
+                                     disease_features = disease_features,
+                                     sex_features = sex_features, 
+                                     age_features = age_features,
+                                     bmi_features = bmi_features,
+                                     batch_features = batch_features,
+                                     individual_features = individual_features,
+                                     
+                                     cluster_ratio = cluster_ratio,
+                                     disease_ratio = disease_ratio,
+                                     sex_ratio = sex_ratio,
+                                     age_ratio = age_ratio,
+                                     bmi_ratio = bmi_ratio,
+                                     batch_ratio = batch_ratio,
+                                     individual_ratio = individual_ratio,
+                                     
+                                     ratio_variance = ratio_variance,
+                                     
+                                     cluster_col = cluster_col,
+                                     sex_col = sex_col,
+                                     age_col = age_col,
+                                     bmi_col = bmi_col,
+                                     batch_col = batch_col,
+                                     disease_col = disease_col,
+                                     individual_col = individual_col,
+                                     
+                                     dist_type = dist_type,
+                                     eqtl_celltype = eqtl_celltype, 
+                                     eqtl_gene = eqtl_gene,
+                                     cor_vals = cor_vals,
+                                     allele_freqs = allele_freqs,
+                                     n_snps = n_snps, 
+                                     
+                                     seed = seed,
+                                     n_thread = n_thread,
+                                     verbose = TRUE
+                                     
+)
+
+```
+
+```{r}
+
+meta_data = datasets$dummy_data
+head(meta_data)
+dim(meta_data)
+
+```
+
+
+
+```{r, fig.width=10, fig.height=6}
+
+meta_data %>%
+  dplyr::group_by(subject_id,sex,disease,cell_type) %>%
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::group_by(subject_id,sex,disease) %>%
+  dplyr::mutate(proportion = 100*count/sum(count),
+                sex_label = ifelse(sex=="0","Male","Female"),
+                disease_label = ifelse(disease=="0","Control","Disease")) %>%
+  ggplot(.,aes(x=disease_label,y=proportion,color = disease_label)) +
+  geom_boxplot() +
+  geom_point(position=position_jitterdodge(0.9)) +
+  ggpubr::stat_compare_means(comparisons = list(c("Control","Disease")), 
+                             label = "{p.adj}{p.adj.signif}", method = "wilcox.test", label.y.npc = 0.4, tip.length = 0) +
+  scale_color_manual(values = c(
+    "Control" = "#4DAF4A",
+    "Disease" = "#984EA3")) +
+  ggh4x::facet_nested_wrap(vars(cell_type, sex_label), nrow = 1) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+        legend.text =  element_text(size = 15),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 0.8, hjust = 0)) +
+  labs(
+    x = "Disease status",
+    y = "Proportion (%)",
+    title = ""
+  )  
+
+```
+
+
+
+# Large effect of interaction
+
+```{r}
+fc_interact=2
+```
+
+
+
+```{r, warning=FALSE}
+# Generate simulated data
+datasets = generate_data_interaction(n_cells = n_cells,
+                                     sd_celltypes = sd_celltypes, 
+                                     n_major_cell_types = n_major_cell_types,
+                                     n_minor_cell_types = n_minor_cell_types,
+                                     relative_abundance = relative_abundance, 
+                                     n_major_interact_celltypes = n_major_interact_celltypes,
+                                     n_minor_interact_celltypes = n_minor_interact_celltypes,
+                                     interaction_feature_1 = interaction_feature_1,
+                                     interaction_feature_2 = interaction_feature_2,
+                                     interaction_type = interaction_type,
+                                     
+                                     n_individuals = n_individuals,
+                                     n_batchs = n_batchs,
+                                     prop_sex = prop_sex, 
+                                     prop_disease = prop_disease, 
+                                     fc_interact = fc_interact,
+                                     
+                                     n_features = n_features, 
+                                     cluster_features = cluster_features,
+                                     disease_features = disease_features,
+                                     sex_features = sex_features, 
+                                     age_features = age_features,
+                                     bmi_features = bmi_features,
+                                     batch_features = batch_features,
+                                     individual_features = individual_features,
+                                     
+                                     cluster_ratio = cluster_ratio,
+                                     disease_ratio = disease_ratio,
+                                     sex_ratio = sex_ratio,
+                                     age_ratio = age_ratio,
+                                     bmi_ratio = bmi_ratio,
+                                     batch_ratio = batch_ratio,
+                                     individual_ratio = individual_ratio,
+                                     
+                                     ratio_variance = ratio_variance,
+                                     
+                                     cluster_col = cluster_col,
+                                     sex_col = sex_col,
+                                     age_col = age_col,
+                                     bmi_col = bmi_col,
+                                     batch_col = batch_col,
+                                     disease_col = disease_col,
+                                     individual_col = individual_col,
+                                     
+                                     dist_type = dist_type,
+                                     eqtl_celltype = eqtl_celltype, 
+                                     eqtl_gene = eqtl_gene,
+                                     cor_vals = cor_vals,
+                                     allele_freqs = allele_freqs,
+                                     n_snps = n_snps, 
+                                     
+                                     seed = seed,
+                                     n_thread = n_thread,
+                                     verbose = TRUE
+                                     
+)
+
+```
+
+```{r}
+
+meta_data = datasets$dummy_data
+head(meta_data)
+dim(meta_data)
+
+```
+
+
+
+```{r, fig.width=10, fig.height=6}
+
+meta_data %>%
+  dplyr::group_by(subject_id,sex,disease,cell_type) %>%
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::group_by(subject_id,sex,disease) %>%
+  dplyr::mutate(proportion = 100*count/sum(count),
+                sex_label = ifelse(sex=="0","Male","Female"),
+                disease_label = ifelse(disease=="0","Control","Disease")) %>%
+  ggplot(.,aes(x=disease_label,y=proportion,color = disease_label)) +
+  geom_boxplot() +
+  geom_point(position=position_jitterdodge(0.9)) +
+  ggpubr::stat_compare_means(comparisons = list(c("Control","Disease")), 
+                             label = "{p.adj}{p.adj.signif}", method = "wilcox.test", label.y.npc = 0.4, tip.length = 0) +
+  scale_color_manual(values = c(
+    "Control" = "#4DAF4A",
+    "Disease" = "#984EA3")) +
+  ggh4x::facet_nested_wrap(vars(cell_type, sex_label), nrow = 1) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=15, color="black"),
+        strip.text.y=element_text(size=15, color="black"),
+        strip.placement = "outside", 
+        strip.background.x=element_rect(color = NA,  fill=NA), 
+        strip.background.y=element_rect(color = "black",  fill=NA),
+        legend.position = "right",
+        plot.title = element_text(size=15),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+        legend.text =  element_text(size = 15),
+        legend.key.size = grid::unit(0.5, "lines"),
+        legend.title = element_text(size = 0.8, hjust = 0)) +
+  labs(
+    x = "Disease status",
+    y = "Proportion (%)",
+    title = ""
+  )  
+
+```

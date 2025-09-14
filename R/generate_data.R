@@ -234,12 +234,15 @@ generate_data <- function(n_cells = 3000,
                     as.data.frame() %>%
                     tibble::rownames_to_column("sample"),
                   by="sample")
+  message("The simulated dataset contains ", nrow(bulk_df), " pseudobulk samples across ",
+          length(unique(bulk_df$subject_id)), " individuals and ",
+          length(unique(bulk_df$cell_type)), " cell types.")
+  print(head(bulk_df))
   
   # Set the cell type and gene pair for which to simulate a correlation (eQTL)
-  celltype = eqtl_celltype
   Gene = eqtl_gene
   # Store the trait values that will be correlated with the pseudo-genotypes
-  trait_values <- bulk_df[bulk_df$cell_type == celltype, Gene]
+  trait_values <- bulk_df[bulk_df$cell_type == eqtl_celltype, Gene]
   
   # Set the target correlation coefficients and allele frequencies
   tasks <- expand.grid(cor_val = cor_vals, allele_freq = allele_freqs)

@@ -122,20 +122,21 @@ generate_data_interaction <- function(n_cells = 3000,
 ) {
   
   dummy_data <- generate_dummy_data_interaction(n_cells = n_cells,
-                                    sd_celltypes = sd_celltypes,
-                                    n_major_cell_types = n_major_cell_types,
-                                    n_minor_cell_types = n_minor_cell_types,
-                                    relative_abundance = relative_abundance,
-                                    n_major_interact_celltypes = n_major_interact_celltypes,
-                                    n_minor_interact_celltypes = n_minor_interact_celltypes,
-                                    interaction_feature_1 = interaction_feature_1,
-                                    interaction_feature_2 = interaction_feature_2,
-                                    fc_interact = fc_interact,
-                                    n_individuals = n_individuals,
-                                    n_batchs = n_batchs,
-                                    prop_sex = prop_sex,
-                                    prop_disease = prop_disease,
-                                    seed = seed
+                                                sd_celltypes = sd_celltypes,
+                                                n_major_cell_types = n_major_cell_types,
+                                                n_minor_cell_types = n_minor_cell_types,
+                                                relative_abundance = relative_abundance,
+                                                n_major_interact_celltypes = n_major_interact_celltypes,
+                                                n_minor_interact_celltypes = n_minor_interact_celltypes,
+                                                interaction_feature_1 = interaction_feature_1,
+                                                interaction_feature_2 = interaction_feature_2,
+                                                fc_interact = fc_interact,
+                                                interaction_type = interaction_type,
+                                                n_individuals = n_individuals,
+                                                n_batchs = n_batchs,
+                                                prop_sex = prop_sex,
+                                                prop_disease = prop_disease,
+                                                seed = seed
   )
   diff_cell_types = dummy_data[[2]]
   dummy_data = dummy_data[[1]]

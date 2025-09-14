@@ -254,7 +254,7 @@ generate_data <- function(n_cells = 3000,
     cor_val <- task$cor_val
     allele_freq <- task$allele_freq
     
-    aggregate_trials <- function(cor_val, allele_freq, celltype, n_snps = 100, verbose = TRUE) {
+    aggregate_trials <- function(cor_val, allele_freq, n_snps = 100, verbose = TRUE) {
       # Target correlation range
       target_cor_min <- cor_val - 0.05
       target_cor_max <- cor_val + 0.05
@@ -310,9 +310,9 @@ generate_data <- function(n_cells = 3000,
         cor_test_result <- cor.test(trait_values, dosage_values)
         cor_val_attempt <- cor_test_result$estimate
         p_val_attempt <- cor_test_result$p.value
-        trait_values_cell <- simulation_counts[dummy_data$cell_type == celltype, Gene]
-        dosage_values_cell <- dplyr::left_join(dummy_data[dummy_data$cell_type == celltype, ],
-                                               data.frame(subject_id = bulk_df[bulk_df$cell_type == celltype, individual_col],
+        trait_values_cell <- simulation_counts[dummy_data$cell_type == eqtl_celltype, Gene]
+        dosage_values_cell <- dplyr::left_join(dummy_data[dummy_data$cell_type == eqtl_celltype, ],
+                                               data.frame(subject_id = bulk_df[bulk_df$cell_type == eqtl_celltype, individual_col],
                                                           dosage_values),
                                                by = "subject_id") %>%
           .$dosage_values

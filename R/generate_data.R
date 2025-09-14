@@ -226,8 +226,8 @@ generate_data <- function(n_cells = 3000,
                      dummy_data[,c(individual_col,sex_col,age_col,bmi_col,batch_col,disease_col)] %>%
                        dplyr::distinct(),
                      by="subject_id")
-  all(all_collapse$meta_data$sample == colnames(all_collapse$counts_mat))
-  all(all_collapse$meta_data$sample == colnames(rn))
+  # all(all_collapse$meta_data$sample == colnames(all_collapse$counts_mat))
+  # all(all_collapse$meta_data$sample == colnames(rn))
   
   bulk_df = merge(all_collapse$meta_data,
                   t(rn) %>%
@@ -235,9 +235,11 @@ generate_data <- function(n_cells = 3000,
                     tibble::rownames_to_column("sample"),
                   by="sample")
   message("The simulated dataset contains ", nrow(bulk_df), " pseudobulk samples across ",
-          length(unique(bulk_df$subject_id)), " individuals and ",
-          length(unique(bulk_df$cell_type)), " cell types.")
-  print(head(bulk_df))
+          length(unique(bulk_df$subject_id)), " individuals,\n",
+          length(unique(bulk_df$cell_type)), " cell types,\n",
+          ncol(rn), " genes,\n",
+          "with ", nrow(simulation_counts), " single cells in total.")
+  # print(head(bulk_df))
   
   # Set the cell type and gene pair for which to simulate a correlation (eQTL)
   Gene = eqtl_gene
@@ -322,6 +324,8 @@ generate_data <- function(n_cells = 3000,
         cor_test_cell_result <- cor.test(trait_values_cell, dosage_values_cell)
         cor_val_attempt_cell <- cor_test_cell_result$estimate
         p_val_attempt_cell <- cor_test_cell_result$p.value
+        
+        success <- FALSE
         
         if(cor_val_attempt >= target_cor_min && cor_val_attempt <= target_cor_max && !is.na(as.numeric(cor_test_result$estimate))) {
           success <- TRUE

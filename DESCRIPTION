@@ -33,3 +33,5 @@ Imports:
     utils,
     variancePartition,
     iterators
+URL: https://github.com/juninamo/SimSCEQTL
+BugReports: https://github.com/juninamo/SimSCEQTL/issues

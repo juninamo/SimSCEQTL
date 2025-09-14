@@ -358,7 +358,7 @@ generate_data <- function(n_cells = 3000,
       )
     }
     
-    result <- aggregate_trials(cor_val, allele_freq, celltype, n_snps = n_snps, verbose = FALSE)
+    result <- aggregate_trials(cor_val, allele_freq, n_snps = n_snps, verbose = FALSE)
     return(result)
   }
   

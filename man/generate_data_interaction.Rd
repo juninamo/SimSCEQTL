@@ -19,7 +19,7 @@ generate_data_interaction(
   interaction_feature_1 = c("sex", "age", "disease", "bmi"),
   interaction_feature_2 = c("sex", "age", "disease", "bmi"),
   fc_interact = 0.1,
-  interaction_type = c("specific", "differential", "opposite"),
+  interaction_type = NULL,
   n_features = 20,
   cluster_features = 1:20,
   disease_features = 0,

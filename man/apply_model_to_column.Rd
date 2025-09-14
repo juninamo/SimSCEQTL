@@ -4,7 +4,7 @@
 \alias{apply_model_to_column}
 \title{Apply a Mixed Model and Calculate Variance Partition}
 \usage{
-apply_model_to_column(column_data)
+apply_model_to_column(column_data, meta_data)
 }
 \arguments{
 \item{column_data}{A numeric vector to be used as the response variable.}

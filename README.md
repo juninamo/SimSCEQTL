@@ -64,6 +64,7 @@ sim_data <- generate_data(
   # Define a ground-truth eQTL in Cell Type 'A' for Gene1
   eqtl_celltype = "A",
   eqtl_gene = "Gene1",
+  dist_type = "nb",
   cor_vals = c(0, 0.3), # Simulate null (r=0) and active (r=0.3) eQTLs
   allele_freqs = c(0.1, 0.3)
 )
@@ -72,17 +73,19 @@ sim_data <- generate_data(
 # The output contains all necessary data to perform power analysis,
 # as demonstrated in our vignettes.
 # For example, plot the ground-truth eQTL effect in the pseudobulk data.
-genotype_df <- as.data.frame(t(sim_data$genotype_df_list$`0.3_0.3`))
-colnames(genotype_df) <- paste0("SNP", 1:ncol(genotype_df))
-genotype_df$subject_id <- rownames(genotype_df)
-
-pseudobulk_data <- sim_data$bulk_df %>%
-  filter(cell_type == "A") %>%
-  left_join(genotype_df, by = "subject_id")
+pseudobulk_data <- sim_data$genotype_df_list$`0.3_0.1` %>%
+  magrittr::set_colnames(sim_data$bulk_df[sim_data$bulk_df$cell_type == "A", "subject_id"]) %>%
+  magrittr::set_rownames(paste0("SNP",1:100)) %>%
+  t() %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "subject_id") %>%
+  dplyr::left_join(sim_data$bulk_df, ., by = "subject_id") %>%
+  filter(cell_type == "A")
 
 ggplot(pseudobulk_data, aes(x = as.factor(SNP1), y = Gene1)) +
   geom_boxplot() +
   geom_jitter(width = 0.2) +
+  geom_smooth(method = "lm", aes(group = cell_type), se = FALSE, color = "black") +
   labs(
     title = "Simulated eQTL in Cell Type A",
     subtitle = "Effect Size (r) = 0.3, MAF = 0.3",

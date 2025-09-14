@@ -254,7 +254,7 @@ generate_data <- function(n_cells = 3000,
     cor_val <- task$cor_val
     allele_freq <- task$allele_freq
     
-    aggregate_trials <- function(cor_val, allele_freq, n_snps = 100, verbose = TRUE) {
+    aggregate_trials <- function(cor_val, allele_freq, celltype, n_snps = 100, verbose = TRUE) {
       # Target correlation range
       target_cor_min <- cor_val - 0.05
       target_cor_max <- cor_val + 0.05
@@ -358,7 +358,7 @@ generate_data <- function(n_cells = 3000,
       )
     }
     
-    result <- aggregate_trials(cor_val, allele_freq, n_snps = n_snps, verbose = FALSE)
+    result <- aggregate_trials(cor_val, allele_freq, celltype, n_snps = n_snps, verbose = FALSE)
     return(result)
   }
   

@@ -1,5 +1,5 @@
 
-# SimSCEQTL: A Flexible Simulator for Single-Cell Genomics
+# SimSCEQTL: A Flexible Simulator for Single-Cell Genomics <img src="man/figures/logo.png" align="right" height="138" />
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

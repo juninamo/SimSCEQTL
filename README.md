@@ -13,11 +13,11 @@ The framework allows users to precisely control sources of variation, including 
 
 `SimSCEQTL` provides a suite of functions to simulate each component of a single-cell experiment:
 
--   **🧬 Simulate Complex Cohorts:** Generate multi-individual metadata with customizable covariates such as age, sex, disease status, and batch.
--   **🔬 Model Cell Abundance:** Simulate realistic cell type compositions, including the ability to introduce differential abundance between groups (e.g., case vs. control) or complex interaction effects (e.g., disease effect is specific to a certain sex).
--   **📊 Generate Realistic Counts:** Use a latent feature model based on Gaussian Mixtures to generate sparse, overdispersed count data that mimics the properties of real scRNA-seq.
--   **🔗 Embed Ground-Truth eQTLs:** Simulate paired genotype data and embed cell-type-specific eQTL signals with user-defined effect sizes (correlation) and allele frequencies.
--   **⚙️ Enable Benchmarking of Analysis Pipelines:** The generated data is ideal for evaluating the statistical power and robustness of various analysis methods, such as pseudobulk approaches or cell-level mixed models.
+-   **🧬 Simulate complex cohorts:** Generate multi-individual metadata with customizable covariates such as age, sex, disease status, and batch.
+-   **🔬 Model cell abundance:** Simulate realistic cell type compositions, including the ability to introduce differential abundance between groups (e.g., case vs. control) or complex interaction effects (e.g., disease effect is specific to a certain sex).
+-   **📊 Generate realistic counts:** Use a latent feature model based on Gaussian Mixtures to generate sparse, overdispersed count data that mimics the properties of real scRNA-seq.
+-   **🔗 Embed ground-truth eQTLs:** Simulate paired genotype data and embed cell-type-specific eQTL signals with user-defined effect sizes (correlation) and allele frequencies.
+-   **⚙️ Enable benchmarking of analysis pipelines:** The generated data is ideal for evaluating the statistical power and robustness of various analysis methods, such as pseudobulk approaches or cell-level mixed models.
 
 ---
 
@@ -101,9 +101,9 @@ ggplot(pseudobulk_data, aes(x = as.factor(SNP1), y = Gene1)) +
 
 For detailed tutorials and use cases, please see our [vignettes](https://github.com/juninamo/SimSCEQTL/tree/master/vignettes):
 
-  * **Simulating Cell Type Abundance:** A guide to simulating datasets with differential cell type proportions.
-  * **Simulating Interaction Effects on Abundance:** Learn how to model complex interactions between covariates.
-  * **Benchmarking sc-eQTL Methods:** A complete walkthrough of generating a dataset with ground-truth eQTLs and performing a power analysis.
+  * **Simulating cell type abundance:** A guide to simulating datasets with differential cell type proportions.
+  * **Simulating interaction effects on abundance:** Learn how to model complex interactions between covariates.
+  * **Benchmarking sc-eQTL methods:** A complete walkthrough of generating a dataset with ground-truth eQTLs and performing a power analysis.
 
 -----
 

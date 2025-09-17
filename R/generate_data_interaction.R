@@ -43,6 +43,8 @@
 #' @param batch_col Name of the batch column in the metadata.
 #' @param individual_col Name of the individual ID column in the metadata.
 #' @param dist_type The distribution to use for generating counts from features ("nb" for negative binomial or "poisson").
+#' @param size_nb Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").
+#' @param sparcity The proportion of zero counts to introduce into the simulated count data.
 #' @param eqtl_celltype The cell type in which to simulate the eQTL effect.
 #' @param eqtl_gene The gene for which to simulate the eQTL effect.
 #' @param cor_vals A numeric vector of target correlations for the eQTL simulation.
@@ -110,7 +112,9 @@ generate_data_interaction <- function(n_cells = 3000,
                                       bmi_col = "bmi",
                                       batch_col = "batch",
                                       individual_col = "subject_id",
-                                      dist_type = c("nb","poisson"),
+                                      dist_type = "nb",
+                                      size_nb = 1,
+                                      sparcity = 0,
                                       eqtl_celltype = "A",
                                       eqtl_gene = "Gene1",
                                       cor_vals = c(0, 0.15, 0.3),
@@ -188,12 +192,12 @@ generate_data_interaction <- function(n_cells = 3000,
     if(dist_type == "poisson"){
       # Simulate gene expression
       set.seed(i)
-      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x)))
+      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparcity)))
     } else if (dist_type == "nb"){
       set.seed(i)
       expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) {
-        mu <- exp(x) # mean
-        size <- 1    # this value should be adjusted based on analysis
+        mu <- exp(x - sparcity) # mean
+        size <- size_nb    # this value should be adjusted based on analysis
         prob <- size / (size + mu)
         rnbinom(1, size, prob)
       })

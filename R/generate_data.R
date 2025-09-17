@@ -43,6 +43,8 @@
 #' @param batch_col Name of the batch column in the metadata.
 #' @param individual_col Name of the individual ID column in the metadata.
 #' @param dist_type The distribution to use for generating counts from features ("nb" for negative binomial or "poisson").
+#' @param size_nb Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").
+#' @param sparcity The proportion of zero counts to introduce into the simulated count data.
 #' @param eqtl_celltype The cell type in which to simulate the eQTL effect.
 #' @param eqtl_gene The gene for which to simulate the eQTL effect.
 #' @param cor_vals A numeric vector of target correlations for the eQTL simulation.
@@ -107,7 +109,10 @@ generate_data <- function(n_cells = 3000,
                           bmi_col = "bmi",
                           batch_col = "batch",
                           individual_col = "subject_id",
+                          #common_var = 1, 
                           dist_type = "nb",
+                          size_nb = 1,
+                          sparcity = 0,
                           eqtl_celltype = "A",
                           eqtl_gene = "Gene1",
                           cor_vals = c(0, 0.15, 0.3),
@@ -137,34 +142,36 @@ generate_data <- function(n_cells = 3000,
   
   # Generate pseudo principal components for the data
   ## with the assumption that covariates are removed after harmonization
-  pseudo_feature_matrix <- generate_pseudo_features(dummy_data,
-                                                    n_features = n_features,
-                                                    cluster_features = cluster_features,
-                                                    disease_features = disease_features,
-                                                    sex_features = sex_features,
-                                                    age_features = age_features,
-                                                    bmi_features = bmi_features,
-                                                    batch_features = batch_features,
-                                                    individual_features = individual_features,
-                                                    cluster_ratio = cluster_ratio,
-                                                    disease_ratio = disease_ratio,
-                                                    sex_ratio = sex_ratio,
-                                                    age_ratio = age_ratio,
-                                                    bmi_ratio = bmi_ratio,
-                                                    batch_ratio = batch_ratio,
-                                                    individual_ratio = individual_ratio,
-                                                    ratio_variance = ratio_variance,
-                                                    cluster_col = cluster_col,
-                                                    sex_col = sex_col,
-                                                    age_col = age_col,
-                                                    bmi_col = bmi_col,
-                                                    batch_col = batch_col,
-                                                    disease_col = disease_col,
-                                                    individual_col = individual_col,
-                                                    seed = seed,
-                                                    n_thread = n_thread,
-                                                    verbose = TRUE
-  )
+  pseudo_feature_matrix <- #generate_pseudo_features_fixedVar(dummy_data,
+    generate_pseudo_features(dummy_data,       
+                             n_features = n_features,
+                             cluster_features = cluster_features,
+                             disease_features = disease_features,
+                             sex_features = sex_features,
+                             age_features = age_features,
+                             bmi_features = bmi_features,
+                             batch_features = batch_features,
+                             individual_features = individual_features,
+                             cluster_ratio = cluster_ratio,
+                             disease_ratio = disease_ratio,
+                             sex_ratio = sex_ratio,
+                             age_ratio = age_ratio,
+                             bmi_ratio = bmi_ratio,
+                             batch_ratio = batch_ratio,
+                             individual_ratio = individual_ratio,
+                             ratio_variance = ratio_variance,
+                             cluster_col = cluster_col,
+                             sex_col = sex_col,
+                             age_col = age_col,
+                             bmi_col = bmi_col,
+                             batch_col = batch_col,
+                             disease_col = disease_col,
+                             individual_col = individual_col,
+                             #common_var = common_var,
+                             seed = seed,
+                             n_thread = n_thread,
+                             verbose = TRUE
+    )
   colnames(pseudo_feature_matrix) <- paste0("Feature", 1:ncol(pseudo_feature_matrix))
   
   # Number of pseudo-genes to generate from the dummy features
@@ -182,12 +189,12 @@ generate_data <- function(n_cells = 3000,
     if(dist_type == "poisson"){
       # Simulate gene expression
       set.seed(i)
-      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x)))
+      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparcity)))
     } else if (dist_type == "nb"){
       set.seed(i)
       expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) {
-        mu <- exp(x) # mean
-        size <- 1    # this value should be adjusted based on analysis
+        mu <- exp(x - sparcity) # mean
+        size <- size_nb    # this value should be adjusted based on analysis
         prob <- size / (size + mu)
         rnbinom(1, size, prob)
       })

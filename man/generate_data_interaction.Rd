@@ -43,7 +43,9 @@ generate_data_interaction(
   bmi_col = "bmi",
   batch_col = "batch",
   individual_col = "subject_id",
-  dist_type = c("nb", "poisson"),
+  dist_type = "nb",
+  size_nb = 1,
+  sparcity = 0,
   eqtl_celltype = "A",
   eqtl_gene = "Gene1",
   cor_vals = c(0, 0.15, 0.3),
@@ -120,6 +122,10 @@ generate_data_interaction(
 \item{individual_col}{Name of the individual ID column in the metadata.}
 
 \item{dist_type}{The distribution to use for generating counts from features ("nb" for negative binomial or "poisson").}
+
+\item{size_nb}{Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").}
+
+\item{sparcity}{The proportion of zero counts to introduce into the simulated count data.}
 
 \item{eqtl_celltype}{The cell type in which to simulate the eQTL effect.}
 

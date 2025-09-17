@@ -2,10 +2,7 @@
 
 #' Generate Simulated Single-Cell Data with eQTLs
 #'
-#' This is the main wrapper function to generate a complex simulated dataset.
-#' It simulates cell metadata, gene expression counts based on latent features,
-#' and pseudo-genotypes correlated with the expression of a specific gene in a
-#' specific cell type to simulate eQTL effects.
+#' This is a function to generate genotype data using provided pseudobulk expression data.
 #'
 #' @param bulk_df A data frame containing pseudobulk expression data with columns for cell type and gene expression.
 #' @param eqtl_celltype The cell type in which to simulate the eQTL effect.
@@ -17,9 +14,7 @@
 #' @param n_thread The number of parallel threads to use.
 #' @param verbose Logical. If TRUE, progress messages will be printed.
 #'
-#' @return A list containing several data frames: `simulation_counts` (genes x cells count matrix),
-#'   `dummy_data` (cell-level metadata), `bulk_df` (pseudobulk data),
-#'   `genotype_df_list` (a list of simulated genotype matrices), and
+#' @return A list containing several data frames: `genotype_df_list` (a list of simulated genotype matrices), and
 #'   `cor_summary_df_list` (a summary of the simulated eQTL correlations).
 #'
 #' @importFrom dplyr %>% mutate left_join distinct bind_rows
@@ -35,6 +30,7 @@
 #'
 #' @export
 generate_genotype <- function(bulk_df,
+                              meta_data,
                               eqtl_celltype = "A",
                               eqtl_gene = "Gene1",
                               cor_vals = c(0, 0.15, 0.3),
@@ -120,8 +116,8 @@ generate_genotype <- function(bulk_df,
           cor_test_result <- cor.test(trait_values, dosage_values)
           cor_val_attempt <- cor_test_result$estimate
           p_val_attempt <- cor_test_result$p.value
-          trait_values_cell <- simulation_counts[dummy_data$cell_type == eqtl_celltype, Gene]
-          dosage_values_cell <- dplyr::left_join(dummy_data[dummy_data$cell_type == eqtl_celltype, ],
+          trait_values_cell <- simulation_counts[meta_data$cell_type == eqtl_celltype, Gene]
+          dosage_values_cell <- dplyr::left_join(meta_data[meta_data$cell_type == eqtl_celltype, ],
                                                  data.frame(subject_id = bulk_df[bulk_df$cell_type == eqtl_celltype, individual_col],
                                                             dosage_values),
                                                  by = "subject_id") %>%
@@ -181,10 +177,7 @@ generate_genotype <- function(bulk_df,
     genotype_df_list <- lapply(results_list, function(x) x$genotype_df)
     names(genotype_df_list) <- apply(tasks, 1, function(x) paste(x['cor_val'], x['allele_freq'], sep = "_"))
     
-    return(list(simulation_counts = simulation_counts,
-                dummy_data = dummy_data,
-                bulk_df = bulk_df,
-                genotype_df_list = genotype_df_list,
+    return(list(genotype_df_list = genotype_df_list,
                 cor_summary_df_list = cor_summary_df_list))
   }
 }

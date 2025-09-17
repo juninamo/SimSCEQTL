@@ -43,6 +43,9 @@ generate_data(
   dist_type = "nb",
   size_nb = 1,
   sparsity = 0,
+  transition_prob = 0.5,
+  low_gene_prop = 0.2,
+  generate_genotype = TRUE,
   eqtl_celltype = "A",
   eqtl_gene = "Gene1",
   cor_vals = c(0, 0.15, 0.3),
@@ -129,6 +132,12 @@ generate_data(
 \item{size_nb}{Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").}
 
 \item{sparsity}{The proportion of zero counts to introduce into the simulated count data.}
+
+\item{transition_prob}{The percentile (e.g., 0.9 for 90th percentile) to use for determining the transition to overdispersion.}
+
+\item{low_gene_prop}{The proportion of genes to be assigned low expression levels. (only used if `dist_type` is "poisson").}
+
+\item{generate_genotype}{Logical. If TRUE, genotypes will be simulated.}
 
 \item{eqtl_celltype}{The cell type in which to simulate the eQTL effect.}
 

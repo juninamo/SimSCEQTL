@@ -45,6 +45,9 @@
 #' @param dist_type The distribution to use for generating counts from features ("nb" for negative binomial or "poisson").
 #' @param size_nb Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").
 #' @param sparsity The proportion of zero counts to introduce into the simulated count data.
+#' @param transition_prob The percentile (e.g., 0.9 for 90th percentile) to use for determining the transition to overdispersion.
+#' @param low_gene_prop The proportion of genes to be assigned low expression levels. (only used if `dist_type` is "poisson").
+#' @param generate_genotype Logical. If TRUE, genotypes will be simulated.
 #' @param eqtl_celltype The cell type in which to simulate the eQTL effect.
 #' @param eqtl_gene The gene for which to simulate the eQTL effect.
 #' @param cor_vals A numeric vector of target correlations for the eQTL simulation.
@@ -113,6 +116,9 @@ generate_data <- function(n_cells = 3000,
                           dist_type = "nb",
                           size_nb = 1,
                           sparsity = 0,
+                          transition_prob = 0.5,
+                          low_gene_prop = 0.2,
+                          generate_genotype = TRUE,
                           eqtl_celltype = "A",
                           eqtl_gene = "Gene1",
                           cor_vals = c(0, 0.15, 0.3),
@@ -185,19 +191,67 @@ generate_data <- function(n_cells = 3000,
   simulation_results <- matrix(nrow = nrow(pseudo_feature_matrix), ncol = n_genes)
   
   # Parallel loop
+  rank_genes = colMeans(pseudo_feature_matrix) %>% rank() # rank genes by mean expression
+  low_expressed_genes = round(low_gene_prop*n_genes) # number of lowly expressed genes
+  transition_end_rank <- round(n_genes * transition_prob) # transition point from low to high expression
+  poisson_like_size <- 1e9 # size parameter for negative binomial to approximate Poisson
+  min_mixture_effect <- 0.1 # minimal mixing effects (the closer to zero, the purer the Poisson distribution) even for low-expression genes
   simulation_results <- foreach(i = 1:n_genes, .combine='cbind', .packages=c("stats")) %dopar% {
+
     if(dist_type == "poisson"){
       # Simulate gene expression
       set.seed(i)
-      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparsity)))
+      # generates a mixture of Poisson distributions, each with a different lambda per cell.
+      ## expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparsity)))
+      current_rank <- rank_genes[i]
+      generate_mixed_poisson <- function(feature_vector, rank, low_rank_th, high_rank_th) {
+        # Calculate mixture_effect between 0.1 and 1.0 according to rank
+        if (rank <= low_rank_th) {
+          mixture_effect <- min_mixture_effect
+        } else if (rank < high_rank_th) {
+          scale_factor <- (rank - low_rank_th) / (high_rank_th - low_rank_th)
+          mixture_effect <- min_mixture_effect + (1 - min_mixture_effect) * scale_factor
+        } else {
+          mixture_effect <- 1.0 # Maximum Mixing Effect
+        }
+        scaled_features <- scale(feature_vector)
+        dampened_features <- scaled_features * mixture_effect
+        expression_data <- apply(as.matrix(dampened_features), 1, function(x) {
+          rpois(1, lambda = exp(x - sparsity))
+        })
+        return(expression_data)
+      }
+      
+      expression_data <- generate_mixed_poisson(
+        pseudo_feature_matrix[,i],
+        current_rank,
+        low_expressed_genes,
+        transition_end_rank
+      )
     } else if (dist_type == "nb"){
+      current_rank <- rank_genes[i]
+      if (current_rank < transition_end_rank) {
+        # Calculate the scaling factor (0 to 1) based on the gene's rank
+        scale_factor <- current_rank / transition_end_rank
+        # Calculate dynamic size parameter
+        log_size_start <- log(poisson_like_size)
+        log_size_end <- log(size_nb)
+        dynamic_log_size <- log_size_start * (1 - scale_factor) + log_size_end * scale_factor
+        size <- exp(dynamic_log_size)
+      } else {
+        # For genes beyond the transition zone, use the specified size parameter
+        size <- size_nb
+      }
       set.seed(i)
       expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) {
         mu <- exp(x - sparsity) # mean
-        size <- size_nb    # this value should be adjusted based on analysis
+        # size <- size_nb 
         prob <- size / (size + mu)
-        rnbinom(1, size, prob)
+        rnbinom(1, size, prob) 
       })
+      if (current_rank < transition_end_rank) {
+        expression_data = round(expression_data * scale_factor)
+      }
     }
     return(expression_data)
   }
@@ -244,148 +298,154 @@ generate_data <- function(n_cells = 3000,
   message("The simulated dataset contains ", nrow(bulk_df), " pseudobulk samples across ",
           length(unique(bulk_df$subject_id)), " individuals,\n",
           length(unique(bulk_df$cell_type)), " cell types,\n",
-          ncol(rn), " genes,\n",
-          "with ", nrow(simulation_counts), " single cells in total.")
+          nrow(rn), " genes,\n",
+          "with ", nrow(simulation_counts), " single cells in total")
   # print(head(bulk_df))
-  
-  # Set the cell type and gene pair for which to simulate a correlation (eQTL)
-  Gene = eqtl_gene
-  # Store the trait values that will be correlated with the pseudo-genotypes
-  trait_values <- bulk_df[bulk_df$cell_type == eqtl_celltype, Gene]
-  
-  # Set the target correlation coefficients and allele frequencies
-  tasks <- expand.grid(cor_val = cor_vals, allele_freq = allele_freqs)
-  
-  # Number of simulated SNPs to generate
-  if(is.null(n_thread)) n_thread = detectCores()-1
-  registerDoParallel(cores = n_thread)
-  
-  # List to store results
-  results_list <- list()
-  results_list <- foreach(task = iter(tasks, by = 'row') ) %dopar% {
-    cor_val <- task$cor_val
-    allele_freq <- task$allele_freq
+  if(!generate_genotype){
+    return(list(simulation_counts = simulation_counts,
+                dummy_data = dummy_data,
+                bulk_df = bulk_df))
+  } else {
+    message("Proceeding to simulate genotypes...")
+    # Set the cell type and gene pair for which to simulate a correlation (eQTL)
+    Gene = eqtl_gene
+    # Store the trait values that will be correlated with the pseudo-genotypes
+    trait_values <- bulk_df[bulk_df$cell_type == eqtl_celltype, Gene]
     
-    aggregate_trials <- function(cor_val, allele_freq, n_snps = 100, verbose = TRUE) {
-      # Target correlation range
-      target_cor_min <- cor_val - 0.05
-      target_cor_max <- cor_val + 0.05
+    # Set the target correlation coefficients and allele frequencies
+    tasks <- expand.grid(cor_val = cor_vals, allele_freq = allele_freqs)
+    
+    # Number of simulated SNPs to generate
+    if(is.null(n_thread)) n_thread = detectCores()-1
+    registerDoParallel(cores = n_thread)
+    
+    # List to store results
+    results_list <- list()
+    results_list <- foreach(task = iter(tasks, by = 'row') ) %dopar% {
+      cor_val <- task$cor_val
+      allele_freq <- task$allele_freq
       
-      # Prepare a list to store results
-      correlations <- vector("list", n_snps)
-      p_values <- vector("list", n_snps)
-      
-      # Parallel processing
-      results <- foreach(i = 1:n_snps, .combine = 'rbind') %dopar% {
-        generate_dosage_with_target_correlation <- function(trait_values, target_correlation, allele_freq, n_attempts = 5000, verbose = FALSE, n_trial) {
-          n <- length(trait_values)
-          # Calculate genotype assignment probabilities from allele frequency
-          geno_probs <- c((1-allele_freq)^2, 2*allele_freq*(1-allele_freq), allele_freq^2)
-          # Generate initial dosage_values
-          set.seed(i) # For reproducibility
-          dosage_values <- sample(0:2, n, replace = TRUE, prob = geno_probs)
-          if(all(dosage_values == 0)) dosage_values[1] <- 1 # Ensure at least one non-zero value
-          best_cor <- cor(trait_values, dosage_values)
-          target_cor_min <- target_correlation - 0.015
-          target_cor_max <- target_correlation + 0.015
-          allele_freq_min <- allele_freq - 0.015
-          allele_freq_max <- allele_freq + 0.015
-          # Adjust to approach the target correlation and MAF
-          for (attempt in 1:n_attempts) {
-            set.seed(attempt * n_trial * i) # Change seed for each iteration
-            idx <- sample(n, 1)
-            current_dosage <- dosage_values[idx]
-            # Randomly adjust the dosage
-            possible_dosages <- setdiff(0:2, current_dosage)
-            new_dosage <- sample(possible_dosages, 1)
-            dosage_values[idx] <- new_dosage
-            # Calculate the new correlation
-            new_cor <- cor(trait_values, dosage_values)
-            # Calculate the new MAF
-            new_maf <- min(sum(dosage_values == 1) + 2*sum(dosage_values == 2), sum(dosage_values == 1) + 2*sum(dosage_values == 0)) / (2*n)
-            # If the new correlation and MAF are closer to the target, update; otherwise, revert
-            if (abs(new_cor - target_correlation) < abs(best_cor - target_correlation) && new_maf >= allele_freq_min && new_maf <= allele_freq_max) {
-              best_cor <- new_cor
-              # If a correlation and MAF within the target range are found, exit the loop
-              if (new_cor >= target_cor_min && new_cor <= target_cor_max) {
-                break
+      aggregate_trials <- function(cor_val, allele_freq, n_snps = 100, verbose = TRUE) {
+        # Target correlation range
+        target_cor_min <- cor_val - 0.05
+        target_cor_max <- cor_val + 0.05
+        
+        # Prepare a list to store results
+        correlations <- vector("list", n_snps)
+        p_values <- vector("list", n_snps)
+        
+        # Parallel processing
+        results <- foreach(i = 1:n_snps, .combine = 'rbind') %dopar% {
+          generate_dosage_with_target_correlation <- function(trait_values, target_correlation, allele_freq, n_attempts = 5000, verbose = FALSE, n_trial) {
+            n <- length(trait_values)
+            # Calculate genotype assignment probabilities from allele frequency
+            geno_probs <- c((1-allele_freq)^2, 2*allele_freq*(1-allele_freq), allele_freq^2)
+            # Generate initial dosage_values
+            set.seed(i) # For reproducibility
+            dosage_values <- sample(0:2, n, replace = TRUE, prob = geno_probs)
+            if(all(dosage_values == 0)) dosage_values[1] <- 1 # Ensure at least one non-zero value
+            best_cor <- cor(trait_values, dosage_values)
+            target_cor_min <- target_correlation - 0.015
+            target_cor_max <- target_correlation + 0.015
+            allele_freq_min <- allele_freq - 0.015
+            allele_freq_max <- allele_freq + 0.015
+            # Adjust to approach the target correlation and MAF
+            for (attempt in 1:n_attempts) {
+              set.seed(attempt * n_trial * i) # Change seed for each iteration
+              idx <- sample(n, 1)
+              current_dosage <- dosage_values[idx]
+              # Randomly adjust the dosage
+              possible_dosages <- setdiff(0:2, current_dosage)
+              new_dosage <- sample(possible_dosages, 1)
+              dosage_values[idx] <- new_dosage
+              # Calculate the new correlation
+              new_cor <- cor(trait_values, dosage_values)
+              # Calculate the new MAF
+              new_maf <- min(sum(dosage_values == 1) + 2*sum(dosage_values == 2), sum(dosage_values == 1) + 2*sum(dosage_values == 0)) / (2*n)
+              # If the new correlation and MAF are closer to the target, update; otherwise, revert
+              if (abs(new_cor - target_correlation) < abs(best_cor - target_correlation) && new_maf >= allele_freq_min && new_maf <= allele_freq_max) {
+                best_cor <- new_cor
+                # If a correlation and MAF within the target range are found, exit the loop
+                if (new_cor >= target_cor_min && new_cor <= target_cor_max) {
+                  break
+                }
+              } else {
+                dosage_values[idx] <- current_dosage # Revert the change
               }
-            } else {
-              dosage_values[idx] <- current_dosage # Revert the change
             }
+            return(dosage_values)
           }
-          return(dosage_values)
+          
+          # Evaluate the result
+          dosage_values <- generate_dosage_with_target_correlation(trait_values, cor_val, allele_freq, n_attempts = 1000, n_trial = i)
+          cor_test_result <- cor.test(trait_values, dosage_values)
+          cor_val_attempt <- cor_test_result$estimate
+          p_val_attempt <- cor_test_result$p.value
+          trait_values_cell <- simulation_counts[dummy_data$cell_type == eqtl_celltype, Gene]
+          dosage_values_cell <- dplyr::left_join(dummy_data[dummy_data$cell_type == eqtl_celltype, ],
+                                                 data.frame(subject_id = bulk_df[bulk_df$cell_type == eqtl_celltype, individual_col],
+                                                            dosage_values),
+                                                 by = "subject_id") %>%
+            .$dosage_values
+          cor_test_cell_result <- cor.test(trait_values_cell, dosage_values_cell)
+          cor_val_attempt_cell <- cor_test_cell_result$estimate
+          p_val_attempt_cell <- cor_test_cell_result$p.value
+          
+          success <- FALSE
+          
+          if(cor_val_attempt >= target_cor_min && cor_val_attempt <= target_cor_max && !is.na(as.numeric(cor_test_result$estimate))) {
+            success <- TRUE
+            return(c(dosage = dosage_values,
+                     correlation = cor_val_attempt,
+                     p_value = p_val_attempt,
+                     correlation_cell = cor_val_attempt_cell,
+                     p_value_cell = p_val_attempt_cell))
+          }
+          
+          if (!success) {
+            return(c(NA, NA, NA, NA, NA)) # If the correlation never reached the target range
+          }
         }
         
-        # Evaluate the result
-        dosage_values <- generate_dosage_with_target_correlation(trait_values, cor_val, allele_freq, n_attempts = 1000, n_trial = i)
-        cor_test_result <- cor.test(trait_values, dosage_values)
-        cor_val_attempt <- cor_test_result$estimate
-        p_val_attempt <- cor_test_result$p.value
-        trait_values_cell <- simulation_counts[dummy_data$cell_type == eqtl_celltype, Gene]
-        dosage_values_cell <- dplyr::left_join(dummy_data[dummy_data$cell_type == eqtl_celltype, ],
-                                               data.frame(subject_id = bulk_df[bulk_df$cell_type == eqtl_celltype, individual_col],
-                                                          dosage_values),
-                                               by = "subject_id") %>%
-          .$dosage_values
-        cor_test_cell_result <- cor.test(trait_values_cell, dosage_values_cell)
-        cor_val_attempt_cell <- cor_test_cell_result$estimate
-        p_val_attempt_cell <- cor_test_cell_result$p.value
+        # Post-process the results
+        genotypes <- results[,1:length(trait_values)]
+        correlations <- as.numeric(results[, "correlation.cor"])
+        p_values <- as.numeric(results[, "p_value"])
+        correlations_cell <- as.numeric(results[, "correlation_cell.cor"])
+        p_values_cell <- as.numeric(results[, "p_value_cell"])
         
-        success <- FALSE
-        
-        if(cor_val_attempt >= target_cor_min && cor_val_attempt <= target_cor_max && !is.na(as.numeric(cor_test_result$estimate))) {
-          success <- TRUE
-          return(c(dosage = dosage_values,
-                   correlation = cor_val_attempt,
-                   p_value = p_val_attempt,
-                   correlation_cell = cor_val_attempt_cell,
-                   p_value_cell = p_val_attempt_cell))
-        }
-        
-        if (!success) {
-          return(c(NA, NA, NA, NA, NA)) # If the correlation never reached the target range
-        }
+        return(list(genotype_df = genotypes,
+                    cor_summary = c(cor_val = cor_val,
+                                    allele_freq = allele_freq,
+                                    mean_cor = mean(correlations, na.rm = TRUE),
+                                    ci_lower = quantile(correlations, probs = 0.025, na.rm = TRUE),
+                                    ci_upper = quantile(correlations, probs = 0.975, na.rm = TRUE),
+                                    power = mean(p_values < 0.05, na.rm = TRUE),
+                                    mean_cor_cell = mean(correlations_cell, na.rm = TRUE),
+                                    ci_lower_cell = quantile(correlations_cell, probs = 0.025, na.rm = TRUE),
+                                    ci_upper_cell = quantile(correlations_cell, probs = 0.975, na.rm = TRUE),
+                                    power_cell = mean(p_values_cell < 0.05, na.rm = TRUE),
+                                    n_snps = n_snps,
+                                    N = length(trait_values)
+                    ))
+        )
       }
       
-      # Post-process the results
-      genotypes <- results[,1:length(trait_values)]
-      correlations <- as.numeric(results[, "correlation.cor"])
-      p_values <- as.numeric(results[, "p_value"])
-      correlations_cell <- as.numeric(results[, "correlation_cell.cor"])
-      p_values_cell <- as.numeric(results[, "p_value_cell"])
-      
-      return(list(genotype_df = genotypes,
-                  cor_summary = c(cor_val = cor_val,
-                                  allele_freq = allele_freq,
-                                  mean_cor = mean(correlations, na.rm = TRUE),
-                                  ci_lower = quantile(correlations, probs = 0.025, na.rm = TRUE),
-                                  ci_upper = quantile(correlations, probs = 0.975, na.rm = TRUE),
-                                  power = mean(p_values < 0.05, na.rm = TRUE),
-                                  mean_cor_cell = mean(correlations_cell, na.rm = TRUE),
-                                  ci_lower_cell = quantile(correlations_cell, probs = 0.025, na.rm = TRUE),
-                                  ci_upper_cell = quantile(correlations_cell, probs = 0.975, na.rm = TRUE),
-                                  power_cell = mean(p_values_cell < 0.05, na.rm = TRUE),
-                                  n_snps = n_snps,
-                                  N = length(trait_values)
-                  ))
-      )
+      result <- aggregate_trials(cor_val, allele_freq, n_snps = n_snps, verbose = FALSE)
+      return(result)
     }
     
-    result <- aggregate_trials(cor_val, allele_freq, n_snps = n_snps, verbose = FALSE)
-    return(result)
+    # Check if the ground truth correlations match the targets
+    cor_summary_df_list <- lapply(results_list, function(x) x$cor_summary) %>% bind_rows()
+    
+    # For subsequent pseudobulk eQTL analysis, extract only the genotype_df elements
+    genotype_df_list <- lapply(results_list, function(x) x$genotype_df)
+    names(genotype_df_list) <- apply(tasks, 1, function(x) paste(x['cor_val'], x['allele_freq'], sep = "_"))
+    
+    return(list(simulation_counts = simulation_counts,
+                dummy_data = dummy_data,
+                bulk_df = bulk_df,
+                genotype_df_list = genotype_df_list,
+                cor_summary_df_list = cor_summary_df_list))
   }
-  
-  # Check if the ground truth correlations match the targets
-  cor_summary_df_list <- lapply(results_list, function(x) x$cor_summary) %>% bind_rows()
-  
-  # For subsequent pseudobulk eQTL analysis, extract only the genotype_df elements
-  genotype_df_list <- lapply(results_list, function(x) x$genotype_df)
-  names(genotype_df_list) <- apply(tasks, 1, function(x) paste(x['cor_val'], x['allele_freq'], sep = "_"))
-  
-  return(list(simulation_counts = simulation_counts,
-              dummy_data = dummy_data,
-              bulk_df = bulk_df,
-              genotype_df_list = genotype_df_list,
-              cor_summary_df_list = cor_summary_df_list))
 }

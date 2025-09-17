@@ -44,7 +44,7 @@
 #' @param individual_col Name of the individual ID column in the metadata.
 #' @param dist_type The distribution to use for generating counts from features ("nb" for negative binomial or "poisson").
 #' @param size_nb Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").
-#' @param sparcity The proportion of zero counts to introduce into the simulated count data.
+#' @param sparsity The proportion of zero counts to introduce into the simulated count data.
 #' @param eqtl_celltype The cell type in which to simulate the eQTL effect.
 #' @param eqtl_gene The gene for which to simulate the eQTL effect.
 #' @param cor_vals A numeric vector of target correlations for the eQTL simulation.
@@ -114,7 +114,7 @@ generate_data_interaction <- function(n_cells = 3000,
                                       individual_col = "subject_id",
                                       dist_type = "nb",
                                       size_nb = 1,
-                                      sparcity = 0,
+                                      sparsity = 0,
                                       eqtl_celltype = "A",
                                       eqtl_gene = "Gene1",
                                       cor_vals = c(0, 0.15, 0.3),
@@ -192,11 +192,11 @@ generate_data_interaction <- function(n_cells = 3000,
     if(dist_type == "poisson"){
       # Simulate gene expression
       set.seed(i)
-      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparcity)))
+      expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) rpois(1, lambda = exp(x - sparsity)))
     } else if (dist_type == "nb"){
       set.seed(i)
       expression_data <- apply(scale(pseudo_feature_matrix[,i]), 1, function(x) {
-        mu <- exp(x - sparcity) # mean
+        mu <- exp(x - sparsity) # mean
         size <- size_nb    # this value should be adjusted based on analysis
         prob <- size / (size + mu)
         rnbinom(1, size, prob)

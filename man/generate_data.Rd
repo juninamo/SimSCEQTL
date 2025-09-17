@@ -42,7 +42,7 @@ generate_data(
   individual_col = "subject_id",
   dist_type = "nb",
   size_nb = 1,
-  sparcity = 0,
+  sparsity = 0,
   eqtl_celltype = "A",
   eqtl_gene = "Gene1",
   cor_vals = c(0, 0.15, 0.3),
@@ -128,7 +128,7 @@ generate_data(
 
 \item{size_nb}{Size parameter for the negative binomial distribution (only used if `dist_type` is "nb").}
 
-\item{sparcity}{The proportion of zero counts to introduce into the simulated count data.}
+\item{sparsity}{The proportion of zero counts to introduce into the simulated count data.}
 
 \item{eqtl_celltype}{The cell type in which to simulate the eQTL effect.}
 
